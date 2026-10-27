@@ -1,0 +1,97 @@
+# ---------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ---------------------------------------------------------------
+# Virtual environments
+# ---------------------------------------------------------------
+.venv/
+venv/
+env/
+ENV/
+
+# ---------------------------------------------------------------
+# Local snapshots / version backups
+# ---------------------------------------------------------------
+backup_before_*/
+backup_*/
+*.bak
+*.orig
+
+# ---------------------------------------------------------------
+# Application runtime data
+# ---------------------------------------------------------------
+state/
+logs/
+log/
+*.log
+temp/
+tmp/
+runtime_output/
+
+# ---------------------------------------------------------------
+# AutoCAD / drawing artifacts
+# ---------------------------------------------------------------
+*.dwg
+*.dxf
+*.dwt
+*.bak
+*.sv$
+*.ac$
+*.dwl
+*.dwl2
+*.plt
+*.pc3
+*.ctb
+*.stb
+*.pdf
+*.PDF
+acad.err
+plot.log
+
+# Keep the bundled reference images
+!resources/reference_images/**
+!lisp/**
+!revision/*.json
+
+# ---------------------------------------------------------------
+# Machine-local user state
+# ---------------------------------------------------------------
+config/settings.json
+!config/settings.example.json
+ErrorReports/
+
+# ---------------------------------------------------------------
+# OS / editor noise
+# ---------------------------------------------------------------
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*~
+
+# ---------------------------------------------------------------
+# Secrets / local overrides
+# ---------------------------------------------------------------
+.env
+.env.*
+!.env.example
+secrets.json
+*.local.json

@@ -1,0 +1,18 @@
+{
+  "source_folder": "C:/path/to/gamma/source/folder",
+  "destination_root": "C:/path/to/nederwiek/destination",
+  "destination_bundle_name": "NEDERWIEK_BUNDLE",
+  "core_console": "C:\\Program Files\\Autodesk\\AutoCAD 2027\\accoreconsole.exe",
+  "project_from": "IJMUIDEN VER GAMMA",
+  "project_to": "NEDERWIEK BETA",
+  "drawing_from": "2013J310015",
+  "drawing_to": "I301-J30019",
+  "long_from": "OEPA230146",
+  "long_to": "OEPA240101",
+  "short_from": "230146",
+  "short_to": "240101",
+  "target_layer": "NEDERWIEK_DATA",
+  "contractor_doc_from": "2GWG",
+  "contractor_doc_to": "2GWN",
+  "workers": 4
+}

@@ -1,0 +1,6 @@
+{
+  "target_layer_name": "NEDERWIEK_DATA",
+  "target_layer_color_aci": 6,
+  "target_source_layers": ["Other", "Other object type"],
+  "max_workers": 4
+}

@@ -1,0 +1,14 @@
+{
+  "plotter_candidates": ["DWG To PDF.pc3", "AutoCAD PDF (General Documentation).pc3"],
+  "preferred_media_names": [
+    "ISO A1 (841.00 x 594.00 MM)",
+    "ISO full bleed A1 (841.00 x 594.00 MM)",
+    "ISO A1 (594.00 x 841.00 MM)",
+    "ANSI D (34.00 x 22.00 Inches)"
+  ],
+  "plot_style": "monochrome.ctb",
+  "plot_rotation": 0,
+  "minimum_pdf_bytes": 4096,
+  "publish_only_atomic_dwg_status": "PUBLISHED",
+  "max_workers": 4
+}
