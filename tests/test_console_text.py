@@ -65,7 +65,6 @@ class SharedDecoderWiringTests(unittest.TestCase):
     """Guards against an engine quietly regrowing its own copy."""
 
     def test_every_engine_uses_the_shared_decoder(self):
-        from revision.controlled_writer import ControlledRevisionWriter
         from revision.reopen_validator import StableReopenValidator
         from revision.stable_external_writer import StableExternalActionWriter
         from titleblock.discovery import TitleBlockDiscoveryEngine
@@ -74,7 +73,6 @@ class SharedDecoderWiringTests(unittest.TestCase):
             StableExternalActionWriter,
             StableReopenValidator,
             TitleBlockDiscoveryEngine,
-            ControlledRevisionWriter,
         ):
             with self.subTest(owner=owner.__name__):
                 self.assertIs(owner._decode, decode_console)

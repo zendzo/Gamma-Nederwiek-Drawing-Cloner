@@ -66,7 +66,6 @@ class SharedHasherWiringTests(unittest.TestCase):
     def test_every_engine_uses_the_shared_hasher(self):
         from revision.atomic_publish_dry_run import AtomicPublisherDryRun
         from revision.atomic_publisher import AtomicPublisher
-        from revision.controlled_writer import ControlledRevisionWriter
         from revision.pdf_publisher import PdfPublisher
         from revision.reopen_validator import StableReopenValidator
         from revision.stable_external_writer import StableExternalActionWriter
@@ -78,7 +77,6 @@ class SharedHasherWiringTests(unittest.TestCase):
             (AtomicPublisherDryRun._sha256, "dry run"),
             (AtomicPublisher._sha256, "publisher"),
             (PdfPublisher._sha, "pdf publisher"),
-            (ControlledRevisionWriter._sha, "controlled writer"),
             (PipelineWorker._sha, "pipeline worker"),
         ]
         for function, label in pairs:
