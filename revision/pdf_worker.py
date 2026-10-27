@@ -36,6 +36,10 @@ class PdfPublishWorker(QThread):
                 should_cancel=lambda: self._cancel_requested,
             )
             report = publisher.write_report(results)
+            if self._cancel_requested:
+                # The report lists only the pairs that actually finished, so on
+                # resume those show as complete. Make it unambiguously partial.
+                publisher.mark_report_incomplete(report, reason="CANCELLED")
             self.completed.emit(results, str(report))
         except Exception:
             self.failed.emit(traceback.format_exc())

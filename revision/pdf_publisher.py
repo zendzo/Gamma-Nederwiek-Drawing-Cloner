@@ -297,6 +297,30 @@ class PdfPublisher:
         order = {str(tx["identity"]): index for index, tx in enumerate(transactions)}
         return [results[key] for key in sorted(results, key=lambda key: order.get(key, 10**9))]
 
+    @staticmethod
+    def mark_report_incomplete(report_path, reason="CANCELLED"):
+        """Flag a report written by an interrupted run as partial.
+
+        ``write_report`` only serialises the pairs that finished, so a cancelled
+        200-drawing batch produced a report that looked like a complete, passing
+        run. The ``complete`` flag lets the pipeline and ``_report_state`` tell
+        the difference instead of silently accepting half the bundle.
+        """
+        path = Path(report_path)
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        payload["complete"] = False
+        payload["cancelled"] = True
+        payload["cancel_reason"] = str(reason)
+        temp = path.with_suffix(".json.tmp")
+        temp.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        os.replace(temp, path)
+        return path
+
     def write_report(self, results):
         path=self.reports/"pdf_publish_report.json"
         unchanged=sum(output.status=="PDF_UNCHANGED" for pair in results for output in pair.outputs)

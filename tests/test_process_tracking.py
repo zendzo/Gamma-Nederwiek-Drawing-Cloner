@@ -58,6 +58,44 @@ class RunConsoleTests(unittest.TestCase):
         self.assertIsNotNone(process.poll())
 
 
+class CloseReopensSpawnTests(unittest.TestCase):
+    """A GUI close must not leave the registry rejecting every future child.
+
+    ``Main.closeEvent`` calls `begin_shutdown()`; without a matching
+    `cancel_shutdown()` the global registry stayed latched and any later
+    `run_console` was killed on spawn (returncode -15, empty output). The suite
+    only exposed this once a GUI test closed a window before this test ran.
+    """
+
+    def test_close_event_unlatches_the_registry(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtWidgets import QApplication, QMessageBox
+
+        saved = {name: getattr(QMessageBox, name)
+                 for name in ("information", "warning", "critical", "question", "exec")}
+        for name in ("information", "warning", "critical"):
+            setattr(QMessageBox, name, staticmethod(lambda *a, **k: QMessageBox.Ok))
+        QMessageBox.exec = lambda self, *a, **k: 1
+        try:
+            app = QApplication.instance() or QApplication([])
+            import app as legacy
+            import runtime.process_tracking as tracking
+
+            main = legacy.Main()
+            main.close()
+            self.assertFalse(tracking.child_registry._shutting_down)
+            result = run_console(
+                [sys.executable, "-c", "print('ok'); raise SystemExit(3)"],
+                capture_output=True,
+            )
+            self.assertEqual(result.returncode, 3)
+            self.assertIn(b"ok", result.stdout)
+            main.deleteLater()
+        finally:
+            for name, value in saved.items():
+                setattr(QMessageBox, name, value)
+
+
 class PruneJobRootTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

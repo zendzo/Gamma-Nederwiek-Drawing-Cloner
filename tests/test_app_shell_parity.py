@@ -60,5 +60,39 @@ class ShellParityTests(unittest.TestCase):
             self.assertTrue(name.endswith(".json"), key)
 
 
+class NavCaptionTests(unittest.TestCase):
+    """The sidebar captions must cover the tabs `app.py` actually builds.
+
+    The map once used pre-rename keys ("Pipeline", "Supporting Files",
+    "Discovery"), so every real page silently fell back to its full title.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_every_real_page_has_a_caption(self):
+        if app_modern is None:  # pragma: no cover
+            self.skipTest("app_modern unavailable")
+        main = legacy.Main()
+        try:
+            tabs = main.centralWidget()
+            titles = [tabs.tabText(index) for index in range(tabs.count())]
+        finally:
+            main.close()
+            main.deleteLater()
+        self.assertTrue(titles)
+        for title in titles:
+            with self.subTest(page=title):
+                self.assertIn(title, app_modern.NAV_CAPTIONS,
+                              "no caption mapped for tab %r" % title)
+                self.assertTrue(app_modern.ModernMain._nav_caption(title).startswith("  "))
+                # The header subtitle had the same stale-key bug.
+                self.assertIn(title, app_modern.PAGE_DESCRIPTIONS,
+                              "no subtitle mapped for tab %r" % title)
+
+
 if __name__ == "__main__":
     unittest.main()
