@@ -1,0 +1,624 @@
+"""Modern PySide6 shell for the Gamma to Nederwiek migration application.
+
+Place this file beside app.py and run app_modern.py. The existing backend,
+workers, settings, reports, and migration methods remain owned by app.Main.
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
+from PySide6.QtWidgets import (
+    QApplication,
+    QAbstractButton,
+    QButtonGroup,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QPushButton,
+    QSizePolicy,
+    QStackedWidget,
+    QScrollArea,
+    QTabWidget,
+    QToolButton,
+    QVBoxLayout,
+    QWidget,
+)
+
+import app as legacy
+
+
+APP_TITLE = "Gamma Cloner"
+APP_SUBTITLE = "Revision Migration Control Center"
+
+
+MODERN_QSS = r"""
+QMainWindow, QWidget {
+    background-color: #F4F7FB;
+    color: #172033;
+    font-family: "Segoe UI";
+    font-size: 10pt;
+}
+QFrame#sidebar {
+    background-color: #111827;
+    border: none;
+}
+QLabel {
+    background-color: transparent;
+    font-family: "Plus Jakarta Sans", "Segoe UI";
+    color: #172033;
+}
+QLabel#brandTitle {
+    color: #FFFFFF;
+    font-size: 17pt;
+    font-weight: 700;
+    background-color: transparent;
+}
+QLabel#brandSubtitle {
+    color: #94A3B8;
+    font-size: 9pt;
+    background-color: transparent;
+}
+QLabel#sectionLabel {
+    color: #64748B;
+    font-size: 9pt;
+    font-weight: 700;
+    padding: 4px 2px;
+    background-color: transparent;
+}
+QToolButton#navButton {
+    background: transparent;
+    color: #CBD5E1;
+    border: none;
+    border-radius: 9px;
+    padding: 11px 13px;
+    text-align: left;
+    font-weight: 600;
+}
+QToolButton#navButton:hover {
+    background-color: #1F2937;
+    color: #FFFFFF;
+}
+QToolButton#navButton:checked {
+    background-color: #2563EB;
+    color: #FFFFFF;
+}
+QFrame#header {
+    background-color: #FFFFFF;
+    border: 1px solid #E2E8F0;
+    border-radius: 14px;
+}
+QLabel#pageTitle {
+    color: #0F172A;
+    font-size: 18pt;
+    font-weight: 700;
+}
+QLabel#pageSubtitle {
+    color: #64748B;
+    font-size: 9.5pt;
+}
+QLabel#statusBadge {
+    background-color: #DCFCE7;
+    color: #166534;
+    border: 1px solid #BBF7D0;
+    border-radius: 10px;
+    padding: 5px 11px;
+    font-weight: 700;
+}
+QLabel#statusBadge[busy="true"] {
+    background-color: #DBEAFE;
+    color: #1D4ED8;
+    border-color: #BFDBFE;
+}
+QGroupBox {
+    background-color: #FFFFFF;
+    border: 1px solid #E2E8F0;
+    border-radius: 12px;
+    margin-top: 14px;
+    padding: 16px 12px 12px 12px;
+    font-weight: 700;
+    color: #334155;
+}
+QGroupBox::title {
+    subcontrol-origin: margin;
+    left: 14px;
+    padding: 0 6px;
+    color: #334155;
+}
+QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QDateEdit, QTextEdit,
+QPlainTextEdit, QListWidget, QTableWidget {
+    background-color: #FFFFFF;
+    color: #172033;
+    border: 1px solid #CBD5E1;
+    border-radius: 8px;
+    padding: 7px 9px;
+}
+QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QDateEdit {
+    min-height: 22px;
+}
+QTextEdit, QPlainTextEdit, QListWidget, QTableWidget {
+    selection-background-color: #DBEAFE;
+    selection-color: #1E3A8A;
+}
+QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus,
+QTextEdit:focus, QPlainTextEdit:focus, QTableWidget:focus {
+    border: 1px solid #2563EB;
+}
+QPushButton {
+    background-color: #334155;
+    color: #FFFFFF;
+    border: 1px solid #334155;
+    border-radius: 8px;
+    padding: 8px 14px;
+    font-weight: 600;
+}
+
+QPushButton:hover {
+    background-color: #475569;
+    border-color: #475569;
+}
+
+QPushButton:pressed {
+    background-color: #1E293B;
+}
+
+QPushButton:disabled {
+    background-color: #E2E8F0;
+    color: #94A3B8;
+    border-color: #CBD5E1;
+}
+QPushButton#primaryButton {
+    background-color: #16A34A;
+    color: #FFFFFF;
+    border: 1px solid #16A34A;
+}
+
+QPushButton#primaryButton:hover {
+    background-color: #15803D;
+}
+QPushButton#dangerButton {
+    background-color: #FFFFFF;
+    color: #B91C1C;
+    border-color: #FCA5A5;
+}
+QPushButton#dangerButton:hover {
+    background-color: #FEF2F2;
+}
+QHeaderView::section {
+    background-color: #F8FAFC;
+    color: #475569;
+    border: none;
+    border-bottom: 1px solid #E2E8F0;
+    padding: 8px;
+    font-weight: 700;
+}
+QTableWidget {
+    gridline-color: #E2E8F0;
+    alternate-background-color: #F8FAFC;
+}
+QTableWidget::item {
+    padding: 5px;
+}
+QProgressBar {
+    background-color: #E2E8F0;
+    border: none;
+    border-radius: 6px;
+    min-height: 12px;
+    text-align: center;
+    color: #0F172A;
+}
+QProgressBar::chunk {
+    background-color: #2563EB;
+    border-radius: 6px;
+}
+QCheckBox, QRadioButton {
+    spacing: 7px;
+}
+QScrollBar:vertical {
+    background: transparent;
+    width: 11px;
+    margin: 2px;
+}
+QScrollBar::handle:vertical {
+    background: #CBD5E1;
+    min-height: 28px;
+    border-radius: 5px;
+}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0px;
+}
+QScrollArea {
+    background: transparent;
+    border: none;
+}
+QScrollArea > QWidget > QWidget {
+    background: transparent;
+}
+QStatusBar {
+    background-color: #FFFFFF;
+    color: #64748B;
+    border-top: 1px solid #E2E8F0;
+}
+"""
+
+
+PAGE_DESCRIPTIONS = {
+    "Setup": "Choose the source, destination, AutoCAD console, and migration mapping.",
+    "Pipeline": "Run the controlled migration stages and monitor every handoff report.",
+    "Supporting Files": "Review and clone part lists, NC1 files, DXF files, and related assets.",
+    "Discovery": "Inspect title-block entities discovered from each DWG.",
+    "Revision Plan": "Review proposed revision actions before controlled writing.",
+    "Reports": "Open pipeline reports and verify the publish-gate evidence.",
+}
+
+
+class ModernMain(legacy.Main):
+    """Modern shell around the existing proven application controller."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setWindowTitle(f"{APP_TITLE} - {APP_SUBTITLE}")
+        self.setMinimumSize(1180, 720)
+        self.resize(1540, 900)
+        self._install_modern_shell()
+        self._apply_widget_roles()
+        # Apply QSS only after all objectName roles have been assigned.
+        # Qt can otherwise keep the generic QPushButton rendering.
+        self.setStyleSheet(MODERN_QSS)
+        self._repolish_button_palette()
+        self._status_timer = QTimer(self)
+        self._status_timer.timeout.connect(self._refresh_modern_status)
+        self._status_timer.start(350)
+        self._refresh_modern_status()
+
+    def _install_modern_shell(self) -> None:
+        old_tabs = self.centralWidget()
+        if not isinstance(old_tabs, QTabWidget):
+            return
+
+        try:
+            old_tabs.currentChanged.disconnect()
+        except (RuntimeError, TypeError):
+            pass
+
+        self._page_names: list[str] = []
+        pages: list[QWidget] = []
+        while old_tabs.count():
+            pages.append(old_tabs.widget(0))
+            self._page_names.append(old_tabs.tabText(0))
+            old_tabs.removeTab(0)
+
+        shell = QWidget(self)
+        shell_layout = QHBoxLayout(shell)
+        shell_layout.setContentsMargins(0, 0, 0, 0)
+        shell_layout.setSpacing(0)
+
+        sidebar = QFrame(shell)
+        sidebar.setObjectName("sidebar")
+        sidebar.setFixedWidth(232)
+        side_layout = QVBoxLayout(sidebar)
+        side_layout.setContentsMargins(18, 22, 18, 18)
+        side_layout.setSpacing(8)
+
+        brand = QLabel(APP_TITLE)
+        brand.setObjectName("brandTitle")
+        subtitle = QLabel(APP_SUBTITLE)
+        subtitle.setObjectName("brandSubtitle")
+        subtitle.setWordWrap(True)
+        side_layout.addWidget(brand)
+        side_layout.addWidget(subtitle)
+        side_layout.addSpacing(22)
+
+        nav_label = QLabel("WORKSPACE")
+        nav_label.setObjectName("sectionLabel")
+        side_layout.addWidget(nav_label)
+
+        self.page_stack = QStackedWidget(shell)
+        self.nav_group = QButtonGroup(self)
+        self.nav_group.setExclusive(True)
+        self.nav_buttons: list[QToolButton] = []
+
+        for index, (title, page) in enumerate(zip(self._page_names, pages)):
+            if title == "Setup":
+                scroll = QScrollArea(self.page_stack)
+                scroll.setWidgetResizable(True)
+                scroll.setFrameShape(QFrame.NoFrame)
+                scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+                scroll.setWidget(page)
+                page_container = scroll
+            else:
+                page_container = page
+            self.page_stack.addWidget(page_container)
+            button = QToolButton(sidebar)
+            button.setObjectName("navButton")
+            button.setText(self._nav_caption(title))
+            button.setToolButtonStyle(Qt.ToolButtonTextOnly)
+            button.setCheckable(True)
+            button.setAutoExclusive(True)
+            button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            button.clicked.connect(lambda checked=False, i=index: self._show_page(i))
+            self.nav_group.addButton(button, index)
+            self.nav_buttons.append(button)
+            side_layout.addWidget(button)
+
+        side_layout.addStretch(1)
+        version = QLabel("Modern shell\nPySide6 / Qt 6")
+        version.setObjectName("brandSubtitle")
+        side_layout.addWidget(version)
+
+        content = QWidget(shell)
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(20, 18, 20, 16)
+        content_layout.setSpacing(14)
+
+        header = QFrame(content)
+        header.setObjectName("header")
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(18, 13, 18, 13)
+
+        title_box = QVBoxLayout()
+        title_box.setSpacing(2)
+        self.modern_page_title = QLabel()
+        self.modern_page_title.setObjectName("pageTitle")
+        self.modern_page_subtitle = QLabel()
+        self.modern_page_subtitle.setObjectName("pageSubtitle")
+        self.modern_page_subtitle.setWordWrap(True)
+        title_box.addWidget(self.modern_page_title)
+        title_box.addWidget(self.modern_page_subtitle)
+        header_layout.addLayout(title_box, 1)
+
+        self.modern_status_badge = QLabel("READY")
+        self.modern_status_badge.setObjectName("statusBadge")
+        self.modern_status_badge.setAlignment(Qt.AlignCenter)
+        header_layout.addWidget(self.modern_status_badge, 0, Qt.AlignVCenter)
+
+        content_layout.addWidget(header)
+        content_layout.addWidget(self.page_stack, 1)
+        shell_layout.addWidget(sidebar)
+        shell_layout.addWidget(content, 1)
+
+        old_tabs.deleteLater()
+        self.setCentralWidget(shell)
+        if self.nav_buttons:
+            self.nav_buttons[0].setChecked(True)
+            self._show_page(0)
+
+    @staticmethod
+    def _nav_caption(title: str) -> str:
+        captions = {
+            "Setup": "  Setup",
+            "Pipeline": "  Migration Pipeline",
+            "Supporting Files": "  Supporting Files",
+            "Discovery": "  Discovery Results",
+            "Revision Plan": "  Revision Plan",
+            "Reports": "  Reports",
+        }
+        return captions.get(title, f"  {title}")
+
+    def _show_page(self, index: int) -> None:
+        if not 0 <= index < self.page_stack.count():
+            return
+        self.page_stack.setCurrentIndex(index)
+        title = self._page_names[index]
+        self.modern_page_title.setText(title)
+        self.modern_page_subtitle.setText(PAGE_DESCRIPTIONS.get(title, ""))
+        if title == "Reports":
+            self.refresh_reports()
+
+    def _apply_widget_roles(self) -> None:
+        if hasattr(self, "primary"):
+            self.primary.setObjectName("primaryButton")
+        for line_edit in self.findChildren(legacy.QLineEdit):
+            line_edit.setMinimumHeight(38)
+            line_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        for form in self.findChildren(legacy.QFormLayout):
+            form.setVerticalSpacing(10)
+            form.setHorizontalSpacing(14)
+            form.setFieldGrowthPolicy(legacy.QFormLayout.AllNonFixedFieldsGrow)
+        if hasattr(self, "adv"):
+            self.adv.setVisible(True)
+            self.adv.setMinimumHeight(82)
+        for widget in self.findChildren(QPushButton):
+            text = widget.text().strip().lower()
+            if any(token in text for token in ("cancel", "stop")):
+                widget.setObjectName("dangerButton")
+            widget.setCursor(Qt.PointingHandCursor)
+        for widget in self.findChildren(QAbstractButton):
+            widget.setFocusPolicy(Qt.StrongFocus)
+
+        for table in self.findChildren(legacy.QTableWidget):
+            table.setAlternatingRowColors(True)
+            table.setShowGrid(False)
+            table.setSelectionBehavior(legacy.QAbstractItemView.SelectRows)
+            table.verticalHeader().setVisible(False)
+
+    def _repolish_button_palette(self) -> None:
+        """Force Qt to re-evaluate object-name based QSS selectors."""
+        widgets = [self]
+        widgets.extend(self.findChildren(QPushButton))
+        if hasattr(self, "adv"):
+            widgets.append(self.adv)
+        for widget in widgets:
+            style = widget.style()
+            style.unpolish(widget)
+            style.polish(widget)
+            widget.update()
+
+    def _refresh_modern_status(self) -> None:
+        busy = bool(getattr(self, "_busy", False))
+        stage = getattr(self, "_running_stage", None)
+        if busy:
+            label = str(stage or "WORKING").replace("_", " ").upper()
+        elif getattr(self, "_chain", False):
+            label = "PIPELINE ACTIVE"
+            busy = True
+        else:
+            label = "READY"
+        self.modern_status_badge.setText(label)
+        self.modern_status_badge.setProperty("busy", busy)
+        self.modern_status_badge.style().unpolish(self.modern_status_badge)
+        self.modern_status_badge.style().polish(self.modern_status_badge)
+
+    # Publish-gate loop protection retained in the modern launcher.
+    def _stage_complete(self, key: str) -> bool:
+        if key == "scan":
+            return bool(self.files)
+        if key in self._skipped:
+            return True
+        path = self.stage_report_path(key)
+        if key == "discovery":
+            root = self.reports_root()
+            return (
+                (root / "title_block_discovery_report.json").is_file()
+                and (root / "title_block_discovery_fields.csv").is_file()
+            )
+        return bool(path and path.is_file())
+
+    def next_stage(self):
+        if not self.files:
+            return "scan", "Scan source"
+        for key, label in legacy.PIPELINE:
+            if key == "scan" or key in self._skipped:
+                continue
+            if not self._stage_complete(key):
+                return key, label
+        return None
+
+    def refresh_pipeline(self) -> None:
+        next_item = self.next_stage()
+        next_key = next_item[0] if next_item else ""
+        self.stage_tbl.setRowCount(len(legacy.PIPELINE))
+        for row, (key, label) in enumerate(legacy.PIPELINE):
+            path = self.stage_report_path(key)
+            if key in self._skipped:
+                state = "SKIPPED"
+            elif key == self._running_stage:
+                state = "RUNNING"
+            elif self._stage_complete(key):
+                state = "DONE"
+            else:
+                state = "PENDING"
+            values = [str(row + 1), label, state, path.name if path else "(this session)"]
+            for column, value in enumerate(values):
+                self.stage_tbl.setItem(row, column, legacy.QTableWidgetItem(value))
+            if key == next_key:
+                self.stage_tbl.selectRow(row)
+        self.refresh_primary()
+
+    def _advance_pipeline(self, completed: str) -> None:
+        self._running_stage = None
+        self.refresh_pipeline()
+        if not self._chain:
+            return
+        if completed not in legacy.AUTO_STAGES:
+            self._chain = False
+            return
+        if not self._stage_complete(completed):
+            self._chain = False
+            self.refresh_pipeline()
+            legacy.QMessageBox.warning(
+                self,
+                "Pipeline stopped safely",
+                f"{completed} finished, but its required report was not found.\n\n"
+                "Automatic execution was stopped to prevent an infinite loop. "
+                "Review the Reports page, then run the stage again from Advanced.",
+            )
+            return
+        completed_index = legacy.AUTO_STAGES.index(completed)
+        next_key = (
+            legacy.AUTO_STAGES[completed_index + 1]
+            if completed_index + 1 < len(legacy.AUTO_STAGES)
+            else None
+        )
+        if next_key:
+            QTimer.singleShot(30, lambda stage=next_key: self.run_stage(stage))
+            return
+        self._chain = False
+        self.refresh_pipeline()
+        next_item = self.next_stage()
+        if next_item:
+            self.status.setText(
+                "Non-destructive stages complete. Review the dry-run report, then publish explicitly."
+            )
+            legacy.QMessageBox.information(
+                self,
+                "Ready to publish",
+                "All non-destructive stages are complete.\n\n"
+                f"Next action: {self.primary.text()}\n\n"
+                "Review the dry-run report before publishing.",
+            )
+
+
+def main() -> int:
+    application = QApplication.instance() or QApplication(sys.argv)
+    application.setApplicationName(APP_TITLE)
+    application.setOrganizationName("Seatrium")
+    application.setStyle("Fusion")
+    window = ModernMain()
+    window.show()
+    return application.exec()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+# QSpinBox#workerInput {
+#     min-width: 82px;
+#     min-height: 36px;
+#     padding: 0 34px 0 12px;
+#     background-color: #FFFFFF;
+#     color: #0F172A;
+#     border: 1px solid #CBD5E1;
+#     border-radius: 9px;
+#     font-weight: 700;
+#     selection-background-color: #DBEAFE;
+# }
+
+# QSpinBox#workerInput:hover {
+#     border-color: #94A3B8;
+#     background-color: #F8FAFC;
+# }
+
+# QSpinBox#workerInput:focus {
+#     border: 2px solid #3B82F6;
+#     background-color: #FFFFFF;
+# }
+
+# QSpinBox#workerInput::up-button,
+# QSpinBox#workerInput::down-button {
+#     subcontrol-origin: border;
+#     width: 28px;
+#     background-color: #EFF6FF;
+#     border-left: 1px solid #BFDBFE;
+# }
+
+# QSpinBox#workerInput::up-button {
+#     subcontrol-position: top right;
+#     border-top-right-radius: 8px;
+#     border-bottom: 1px solid #BFDBFE;
+# }
+
+# QSpinBox#workerInput::down-button {
+#     subcontrol-position: bottom right;
+#     border-bottom-right-radius: 8px;
+# }
+
+# QSpinBox#workerInput::up-button:hover,
+# QSpinBox#workerInput::down-button:hover {
+#     background-color: #DBEAFE;
+# }
+
+# QSpinBox#workerInput::up-button:pressed,
+# QSpinBox#workerInput::down-button:pressed {
+#     background-color: #BFDBFE;
+# }
+
+# QLabel#workerLabel {
+#     background-color: transparent;
+#     color: #475569;
+#     font-weight: 600;
+# }
