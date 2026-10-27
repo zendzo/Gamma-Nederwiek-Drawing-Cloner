@@ -9,8 +9,9 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QByteArray, QSize, Qt, QTimer
 from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
+from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractButton,
@@ -78,6 +79,9 @@ QToolButton#navButton {
     padding: 11px 13px;
     text-align: left;
     font-weight: 600;
+    /* Gap between the SVG icon and the caption. A leading space in the caption
+       would work too, but it widens the label enough to elide long page names. */
+    spacing: 9px;
 }
 QToolButton#navButton:hover {
     background-color: #1F2937;
@@ -314,13 +318,71 @@ PAGE_DESCRIPTIONS = {
 # Sidebar captions, keyed by the real tab titles from app.py::Main.__init__.
 # Short label on the left, full tab title on the right.
 NAV_CAPTIONS = {
-    "Setup": "  Setup",
-    "Drawing Candidates": "  Drawing Candidates",
-    "Supporting File Clone": "  Supporting Files",
-    "Title Block Discovery": "  Discovery Results",
-    "Revision Plan": "  Revision Plan",
-    "Reports": "  Reports",
+    "Setup": "Setup",
+    "Drawing Candidates": "Drawing Candidates",
+    "Supporting File Clone": "Supporting Files",
+    "Title Block Discovery": "Discovery Results",
+    "Revision Plan": "Revision Plan",
+    "Reports": "Reports",
 }
+
+# One outline icon per page. The files are recoloured at render time, so a page
+# without an entry here would render a blank slot; tests/test_app_shell_parity.py
+# checks this map covers every real tab title and that each file exists.
+ICON_DIR = Path(__file__).resolve().parent / "resources" / "icons"
+NAV_ICONS = {
+    "Setup": "setup.svg",
+    "Drawing Candidates": "candidates.svg",
+    "Supporting File Clone": "supporting.svg",
+    "Title Block Discovery": "discovery.svg",
+    "Revision Plan": "revision.svg",
+    "Reports": "reports.svg",
+}
+ICON_SIZE = 18
+# The SVGs are authored in the idle colour. QSvgRenderer does not resolve
+# `currentColor` for us, so that literal *is* the token: _nav_icon() swaps it for
+# white on the checked state. Tests assert every file still contains it.
+ICON_COLOR_IDLE = "#CBD5E1"
+ICON_COLOR_ACTIVE = "#FFFFFF"
+
+
+def _render_icon(svg_text: str, color: str, size: int = ICON_SIZE,
+                 ratio: float = 1.0) -> QPixmap:
+    """Render one recoloured SVG into a transparent, HiDPI-ready pixmap."""
+    renderer = QSvgRenderer(QByteArray(svg_text.replace(ICON_COLOR_IDLE, color).encode("utf-8")))
+    if not renderer.isValid():
+        return QPixmap()
+    pixmap = QPixmap(int(round(size * ratio)), int(round(size * ratio)))
+    pixmap.fill(Qt.transparent)
+    pixmap.setDevicePixelRatio(ratio)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing, True)
+    renderer.render(painter)
+    painter.end()
+    return pixmap
+
+
+def _nav_icon(title: str) -> QIcon:
+    """The sidebar icon for one page, white while that page is selected.
+
+    Returns a null QIcon when the SVG is missing or malformed; the button then
+    falls back to text only instead of leaving an empty slot or crashing.
+    """
+    name = NAV_ICONS.get(title)
+    if not name:
+        return QIcon()
+    try:
+        svg_text = (ICON_DIR / name).read_text(encoding="utf-8")
+    except OSError:
+        return QIcon()
+    screen = QApplication.primaryScreen()
+    ratio = max(1.0, float(screen.devicePixelRatio())) if screen is not None else 1.0
+    icon = QIcon()
+    for state, color in ((QIcon.Off, ICON_COLOR_IDLE), (QIcon.On, ICON_COLOR_ACTIVE)):
+        pixmap = _render_icon(svg_text, color, ICON_SIZE, ratio)
+        if not pixmap.isNull():
+            icon.addPixmap(pixmap, QIcon.Normal, state)
+    return icon
 
 
 class ModernMain(legacy.Main):
@@ -403,7 +465,11 @@ class ModernMain(legacy.Main):
             button = QToolButton(sidebar)
             button.setObjectName("navButton")
             button.setText(self._nav_caption(title))
-            button.setToolButtonStyle(Qt.ToolButtonTextOnly)
+            icon = _nav_icon(title)
+            if not icon.isNull():
+                button.setIcon(icon)
+            button.setIconSize(QSize(ICON_SIZE, ICON_SIZE))
+            button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
             button.setCheckable(True)
             button.setAutoExclusive(True)
             button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -458,8 +524,9 @@ class ModernMain(legacy.Main):
     def _nav_caption(title: str) -> str:
         # Keys must match the real tab titles built in app.py::Main.__init__; the
         # old map used pre-rename names ("Pipeline", "Supporting Files",
-        # "Discovery") and silently fell back to "  <full title>".
-        return NAV_CAPTIONS.get(title, f"  {title}")
+        # "Discovery") and silently fell back to "  <full title>". The leading
+        # spaces are gone now that the icon provides the left padding.
+        return NAV_CAPTIONS.get(title, title)
 
     def _show_page(self, index: int) -> None:
         if not 0 <= index < self.page_stack.count():
