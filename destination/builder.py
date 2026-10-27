@@ -54,15 +54,34 @@ class DestinationBuilder:
         self.bundle_root = self.destination_root / self.bundle_name
         self.asset_root = self.application_root / "resources" / "reference_images"
 
-    @staticmethod
-    def _validate_bundle_name(value):
+    RESERVED_NAMES = frozenset(
+        {"con", "prn", "aux", "nul"}
+        | {"com%s" % index for index in range(1, 10)}
+        | {"lpt%s" % index for index in range(1, 10)}
+    )
+
+    @classmethod
+    def _validate_bundle_name(cls, value):
         value = str(value or "").strip()
         if not value:
             raise ValueError("Destination bundle name is empty")
         if any(char in value for char in '<>:"/\\|?*'):
             raise ValueError("Destination bundle name contains a forbidden Windows character")
+        if any(ord(char) < 32 for char in value):
+            raise ValueError("Destination bundle name contains a control character")
         if value.endswith(".") or value.endswith(" "):
             raise ValueError("Destination bundle name cannot end with dot or space")
+        # "." / ".." would silently resolve to an ancestor of the destination root.
+        if value.strip(".") == "":
+            raise ValueError("Destination bundle name cannot be a relative path segment")
+        # Windows rejects CON, NUL, COM1, and friends even when they carry an
+        # extension ("CON.txt"), and the failure only surfaces when the tree is
+        # being written - long after the user pressed the button.
+        stem = value.split(".")[0].strip().casefold()
+        if stem in cls.RESERVED_NAMES:
+            raise ValueError(
+                "Destination bundle name is a reserved Windows device name: " + value
+            )
         return value
 
     @staticmethod

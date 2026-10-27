@@ -86,6 +86,9 @@ def detect_detailed_rows(owner, identity, drawing_type, rows):
         item.update({
             "x": x, "y": y, "column": field, "column_x": center,
             "header_handle": header_row.get("handle", ""),
+            # RevisionWritePlanBuilder clusters through _cluster_y, which reads
+            # the older _x/_y keys; keep both spellings for both planner classes.
+            "_x": x, "_y": y,
         })
         candidates.append(item)
 
@@ -230,26 +233,43 @@ def adaptive_current_revision(owner, rows):
     return winner[1], winner[2]
 
 
-def install(RevisionWritePlanBuilder, SpatialRevisionRow, NoDonorRevisionCleanupPlanBuilder, TitleBlockCompletionPlanBuilder):
-    def base_rows(cls, identity, drawing_type, rows):
-        detailed, warnings = detect_detailed_rows(cls, identity, drawing_type, rows)
-        output = []
-        for row in detailed:
-            cells = row["cells"]
-            def pair(field):
-                item = cells.get(field, {})
-                return item.get("handle", ""), item.get("value", "")
-            rh, rv = pair("REVISION"); dh, dv = pair("REVISION_DATE")
-            ph, pv = pair("REVISION_PURPOSE"); ch, cv = pair("REVISION_CHANGE_LOG")
-            drh, drv = pair("DRAWN_BY"); ckh, ckv = pair("CHECKED_BY"); aph, apv = pair("APPROVED_BY")
-            output.append(SpatialRevisionRow(
-                identity, drawing_type, row["revision"], row["row_y"], row["header_y"],
-                rh, rv, dh, dv, ph, pv, ch, cv, drh, drv, ckh, ckv, aph, apv,
-                row["confidence"], row["confidence_score"], row["evidence"],
-                "" if row["confidence"] == "HIGH" else "MANUAL_REVIEW_REQUIRED",
-            ))
-        return output, warnings
+def to_spatial_rows(owner, SpatialRevisionRow, identity, drawing_type, rows, detector=detect_detailed_rows):
+    """Convert discovered rows into ``SpatialRevisionRow`` objects.
 
-    RevisionWritePlanBuilder._detect_spatial_rows = classmethod(base_rows)
-    NoDonorRevisionCleanupPlanBuilder._all_revision_rows = classmethod(detect_detailed_rows)
-    TitleBlockCompletionPlanBuilder._find_current_revision = classmethod(adaptive_current_revision)
+    Single implementation shared by the planner classes; these rows used to be
+    produced by a ``classmethod`` installed by the ``install(...)`` monkey patcher.
+    ``owner`` supplies ``_find_header``/``_column_bounds``/``_cluster`` and
+    ``detector`` is the detection strategy (base or 00-row recovery).
+    """
+    detailed, warnings = detector(owner, identity, drawing_type, rows)
+    output = []
+    for row in detailed:
+        cells = row["cells"]
+
+        def pair(field):
+            item = cells.get(field, {})
+            return item.get("handle", ""), item.get("value", "")
+
+        rh, rv = pair("REVISION"); dh, dv = pair("REVISION_DATE")
+        ph, pv = pair("REVISION_PURPOSE"); ch, cv = pair("REVISION_CHANGE_LOG")
+        drh, drv = pair("DRAWN_BY"); ckh, ckv = pair("CHECKED_BY"); aph, apv = pair("APPROVED_BY")
+        output.append(SpatialRevisionRow(
+            identity, drawing_type, row["revision"], row["row_y"], row["header_y"],
+            rh, rv, dh, dv, ph, pv, ch, cv, drh, drv, ckh, ckv, aph, apv,
+            row["confidence"], row["confidence_score"], row["evidence"],
+            "" if row["confidence"] == "HIGH" else "MANUAL_REVIEW_REQUIRED",
+        ))
+    return output, warnings
+
+
+def install(RevisionWritePlanBuilder, SpatialRevisionRow, NoDonorRevisionCleanupPlanBuilder, TitleBlockCompletionPlanBuilder):
+    """Deprecated no-op.
+
+    Detector implementations are selected explicitly now:
+    ``RevisionWritePlanBuilder._detect_spatial_rows`` calls
+    ``revision.recovery_00.detect_with_recovery`` so 00-row reconstruction is not
+    order dependent, and ``TitleBlockCompletionPlanBuilder._find_current_revision``
+    inherits :func:`adaptive_current_revision` from the base class. Kept so older
+    entrypoints that import this name keep working.
+    """
+    return None

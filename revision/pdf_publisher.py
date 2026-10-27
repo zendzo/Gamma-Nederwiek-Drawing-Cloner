@@ -14,6 +14,8 @@ import uuid
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from typing import List
 
+from runtime.process_tracking import run_console
+
 PDF_PUBLISHER_VERSION = "0.4C.6-parallel-plotter"
 PDF_PLOTTER_LOAD_MARKER = "GNI_PDF_MODELSPACE_PLOTTER_0_4C_5_LOADED"
 
@@ -159,7 +161,7 @@ class PdfPublisher:
         ]), encoding="ascii", errors="replace")
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         try:
-            cp = subprocess.run([str(self.core), "/i", str(source), "/s", str(scr), "/l", "en-US"], capture_output=True, text=False, timeout=self.timeout, cwd=str(stage), creationflags=flags)
+            cp = run_console([str(self.core), "/i", str(source), "/s", str(scr), "/l", "en-US"], capture_output=True, text=False, timeout=self.timeout, cwd=str(stage), creationflags=flags)
         except subprocess.TimeoutExpired as error:
             log.write_text("TIMEOUT after " + str(self.timeout) + "s\n", encoding="utf-8", errors="replace")
             raise PdfPublishError(revision + ":PDF_PLOT_TIMEOUT; stage=" + str(stage)) from error

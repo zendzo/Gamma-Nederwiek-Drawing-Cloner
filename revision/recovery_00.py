@@ -166,7 +166,12 @@ def _display_migration_date(value):
     return text
 
 
-def _correct_plan_dates(plans):
+def correct_plan_dates(plans):
+    """Force the 00 revision date to the migration date on every plan.
+
+    Called by ``TitleBlockCompletionPlanBuilder.build``; previously this was
+    applied by wrapping that method at import time.
+    """
     for plan in plans:
         migration_iso = str(getattr(plan, "migration_date", ""))
         if hasattr(plan, "revision_00_date"):
@@ -187,82 +192,67 @@ def _correct_plan_dates(plans):
 
 def install(RevisionWritePlanBuilder, SpatialRevisionRow,
             NoDonorRevisionCleanupPlanBuilder, TitleBlockCompletionPlanBuilder):
-    def base_rows(cls, identity, drawing_type, rows):
-        detailed, warnings = detect_with_recovery(cls, identity, drawing_type, rows)
-        output = []
-        for row in detailed:
-            cells = row["cells"]
-            def pair(field):
-                item = cells.get(field, {})
-                return item.get("handle", ""), item.get("value", "")
-            rh, rv = pair("REVISION"); dh, dv = pair("REVISION_DATE")
-            ph, pv = pair("REVISION_PURPOSE"); ch, cv = pair("REVISION_CHANGE_LOG")
-            drh, drv = pair("DRAWN_BY"); ckh, ckv = pair("CHECKED_BY"); aph, apv = pair("APPROVED_BY")
-            output.append(SpatialRevisionRow(
-                identity, drawing_type, row["revision"], row["row_y"], row["header_y"],
-                rh, rv, dh, dv, ph, pv, ch, cv, drh, drv, ckh, ckv, aph, apv,
-                row["confidence"], row["confidence_score"], row["evidence"],
-                "" if row["confidence"] == "HIGH" else "MANUAL_REVIEW_REQUIRED",
-            ))
-        return output, warnings
+    """Deprecated no-op.
 
-    RevisionWritePlanBuilder._detect_spatial_rows = classmethod(base_rows)
-    NoDonorRevisionCleanupPlanBuilder._all_revision_rows = classmethod(detect_with_recovery)
-    original_build = TitleBlockCompletionPlanBuilder.build
-    if not getattr(original_build, "_gni_2f1_wrapped", False):
-        def build_with_date_fix(self, *args, **kwargs):
-            return _correct_plan_dates(original_build(self, *args, **kwargs))
-        build_with_date_fix._gni_2f1_wrapped = True
-        TitleBlockCompletionPlanBuilder.build = build_with_date_fix
+    The patch body now lives in real code paths: ``RevisionWritePlanBuilder.
+    _detect_spatial_rows`` calls :func:`detect_with_recovery`, and
+    ``TitleBlockCompletionPlanBuilder.build`` calls :func:`correct_plan_dates`.
+    Kept so older entrypoints that import this name keep working.
+    """
+    return None
+
+
+def write_manual_check_report(report_root, plans, cancelled=False):
+    """Write manual_check_required.json/csv for every BLOCKED plan.
+
+    Previously installed by monkey-patching ``ProductionPlanWorker._write_index``
+    at import time; it is now called explicitly from that method.
+    """
+    manual = [plan for plan in plans if str(getattr(plan, "status", "")) == "BLOCKED"]
+    report_root = Path(report_root)
+    report_root.mkdir(parents=True, exist_ok=True)
+    records = []
+    for plan in manual:
+        records.append({
+            "identity": plan.identity,
+            "drawing_type": plan.drawing_type,
+            "status": plan.status,
+            "eligible_for_automatic_writer": False,
+            "errors": list(plan.errors),
+            "warnings": list(plan.warnings),
+            "recommended_action": "CHECK_REVISION_HISTORY_AND_CURRENT_REVISION_MANUALLY",
+        })
+    payload = {
+        "schema": "GNI-Manual-Check-Required-0.4C.7",
+        "version": PATCH_VERSION,
+        "generated_at": datetime.now().astimezone().isoformat(),
+        "summary": {
+            "total_planned": len(plans),
+            "automatic_processing_ready": len(plans) - len(manual),
+            "manual_check_required": len(manual),
+            "automatic_completion_percent": round((len(plans) - len(manual)) * 100.0 / len(plans), 1) if plans else 0.0,
+            "cancelled": bool(cancelled),
+        },
+        "drawings": records,
+    }
+    json_path = report_root / "manual_check_required.json"
+    temporary = json_path.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    os.replace(temporary, json_path)
+    csv_path = report_root / "manual_check_required.csv"
+    temp_csv = csv_path.with_suffix(".csv.tmp")
+    with temp_csv.open("w", newline="", encoding="utf-8-sig") as stream:
+        fields = ["identity", "drawing_type", "status", "eligible_for_automatic_writer", "errors", "warnings", "recommended_action"]
+        writer = csv.DictWriter(stream, fieldnames=fields)
+        writer.writeheader()
+        for row in records:
+            copied = dict(row)
+            copied["errors"] = ";".join(copied["errors"])
+            copied["warnings"] = ";".join(copied["warnings"])
+            writer.writerow(copied)
+    os.replace(temp_csv, csv_path)
 
 
 def install_worker_reports(ProductionPlanWorker):
-    original = ProductionPlanWorker._write_index
-    if getattr(original, "_gni_manual_report_wrapped", False):
-        return
-    def write_index_and_manual(root, plans, total, cancelled):
-        original(root, plans, total, cancelled)
-        manual = [plan for plan in plans if str(getattr(plan, "status", "")) == "BLOCKED"]
-        report_root = Path(root).parent
-        records = []
-        for plan in manual:
-            records.append({
-                "identity": plan.identity,
-                "drawing_type": plan.drawing_type,
-                "status": plan.status,
-                "eligible_for_automatic_writer": False,
-                "errors": list(plan.errors),
-                "warnings": list(plan.warnings),
-                "recommended_action": "CHECK_REVISION_HISTORY_AND_CURRENT_REVISION_MANUALLY",
-            })
-        payload = {
-            "schema": "GNI-Manual-Check-Required-0.4C.2F.1",
-            "version": PATCH_VERSION,
-            "generated_at": datetime.now().astimezone().isoformat(),
-            "summary": {
-                "total_planned": len(plans),
-                "automatic_processing_ready": len(plans) - len(manual),
-                "manual_check_required": len(manual),
-                "automatic_completion_percent": round((len(plans) - len(manual)) * 100.0 / len(plans), 1) if plans else 0.0,
-                "cancelled": bool(cancelled),
-            },
-            "drawings": records,
-        }
-        json_path = report_root / "manual_check_required.json"
-        temporary = json_path.with_suffix(".json.tmp")
-        temporary.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-        os.replace(temporary, json_path)
-        csv_path = report_root / "manual_check_required.csv"
-        temp_csv = csv_path.with_suffix(".csv.tmp")
-        with temp_csv.open("w", newline="", encoding="utf-8-sig") as stream:
-            fields = ["identity", "drawing_type", "status", "eligible_for_automatic_writer", "errors", "warnings", "recommended_action"]
-            writer = csv.DictWriter(stream, fieldnames=fields)
-            writer.writeheader()
-            for row in records:
-                copied = dict(row)
-                copied["errors"] = ";".join(copied["errors"])
-                copied["warnings"] = ";".join(copied["warnings"])
-                writer.writerow(copied)
-        os.replace(temp_csv, csv_path)
-    write_index_and_manual._gni_manual_report_wrapped = True
-    ProductionPlanWorker._write_index = staticmethod(write_index_and_manual)
+    """Deprecated no-op kept so older entrypoints keep importing cleanly."""
+    return ProductionPlanWorker

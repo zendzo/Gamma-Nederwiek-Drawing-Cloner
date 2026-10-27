@@ -15,6 +15,8 @@ import uuid
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from typing import Dict, List
 
+from runtime.process_tracking import run_console
+
 STABLE_WRITER_VERSION = "0.4C.6-parallel-writer"
 
 
@@ -164,7 +166,13 @@ class StableExternalActionWriter:
         )
 
     @classmethod
-    def load_ready_plans(cls, path):
+    def load_ready_plans(cls, path, return_rejected=False):
+        """Return executable plans, dropping (not aborting on) rejected ones.
+
+        A single BLOCKED drawing used to raise ``STABLE_WRITER_PREFLIGHT_FAILED``
+        and stop the whole batch. Now the rejected entries are returned so the UI
+        can report them while the rest of the migration proceeds.
+        """
         payload = json.loads(Path(path).read_text(encoding="utf-8"))
         plans = []
         rejected = []
@@ -194,13 +202,19 @@ class StableExternalActionWriter:
                 if any(not str(handle or "").strip() for handle in handles):
                     errors.append("EMPTY_HANDLE:" + mode)
             if errors:
-                rejected.append(identity + "=" + ",".join(errors))
+                rejected.append({"identity": identity, "errors": errors})
             else:
                 plans.append(plan)
-        if rejected:
-            raise StableWriterError("STABLE_WRITER_PREFLIGHT_FAILED: " + "; ".join(rejected))
         if not plans:
-            raise StableWriterError("NO_READY_STABLE_WRITER_PLANS")
+            detail = "; ".join(
+                item["identity"] + "=" + ",".join(item["errors"]) for item in rejected
+            )
+            raise StableWriterError(
+                "STABLE_WRITER_PREFLIGHT_FAILED: " + detail if rejected
+                else "NO_READY_STABLE_WRITER_PLANS"
+            )
+        if return_rejected:
+            return plans, rejected
         return plans
 
     def _prepare_actions(self, plan: Dict, mode: str):
@@ -375,7 +389,7 @@ class StableExternalActionWriter:
             creation_flags = (
                 getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
             )
-            process = subprocess.run(
+            process = run_console(
                 [
                     str(self.core),
                     "/i",

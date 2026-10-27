@@ -4,7 +4,7 @@ Windows-only PySide6 desktop app that migrates Gamma AutoCAD drawings into the N
 
 ## Run & verify
 
-- `run_app.bat` is the supported entrypoint: finds/installs `uv`, creates `.venv`, runs `uv pip install -r requirements.txt`, then `python app.py`.
+- `run_app.bat` is the supported entrypoint: finds/installs `uv`, creates `.venv`, runs `uv pip install -r requirements.txt`, then `python app_modern.py` (falling back to `app.py` when that file is absent).
 - Direct run once the venv exists: `.\.venv\Scripts\python.exe app.py` (venv is Python 3.12; code needs 3.10+ for `X | None` annotations). `app.py` takes no arguments — it only opens the GUI.
 - Only dependency is `PySide6`. No pyproject, lockfile, linter, or formatter exists — do not invent one. Tests use the standard-library `unittest` runner (no pytest config).
 - Fast syntax check that skips the 70+ backup trees:
@@ -16,6 +16,7 @@ Windows-only PySide6 desktop app that migrates Gamma AutoCAD drawings into the N
 ## Wiring
 
 - `app.py` is the entire GUI plus every button handler, written as deliberately compressed one-liners (`;`-chained, minimal whitespace). Match that style when editing it; `runtime/` and `revision/` are normal PEP8 — don't reformat either.
+- `app_modern.py` (`ModernMain(app.Main)`) is the presentation shell that `run_app.bat` launches: sidebar navigation and QSS over widgets the legacy class already builds. It must **not** re-define pipeline logic (`next_stage`, `_stage_complete`, `refresh_pipeline`, `_advance_pipeline`, `closeEvent`) — an earlier copy drifted from `app.py` and silently lost skipped-stage and `refresh_primary()` handling. `tests/test_app_shell_parity.py` enforces the rule. QSS selectors that target an object name (`QSpinBox#workerInput`, `QLabel#workerLabel`) require `setObjectName` in `_apply_widget_roles()`.
 - **UI model (0.4C.6):** the Setup tab is one pipeline table (`PIPELINE`, `STAGE_REPORTS`, `AUTO_STAGES`) plus a single context-aware `primary` button. `refresh_pipeline()` derives each row's state from report existence and mtimes, and `next_stage()` returns the first missing or stale stage. `run_stage(key)` calls the matching handler and expects `True` when a background operation actually started, `False` otherwise; handlers that return a start flag must not return `None`. `_advance_pipeline()` chains `AUTO_STAGES` only — publishing and PDF stay explicit. Per-stage re-runs live in the collapsed `Advanced` group (`self.stage_buttons`); do not move them back into the main button row.
 - Concurrency is per drawing pair, bounded by the Setup `Parallel workers` spinbox (`Settings.workers`, 1–16). The engines expose `run_many`/`validate_many`/`publish_many(..., workers, on_result, should_cancel)` and re-sort results into plan order; `on_result` fires in completion order, so never assume it is ordered. Keep `workers=1` paths working (they are the deterministic fallback used by tests).
 - Long operations go through `runtime/background_controller.py`: `BackgroundOperationController.start(operation, payload)` dispatches to `PipelineWorker._run_<operation>()`, which imports its engine lazily. New backend work = add `_run_x` there plus the payload built in `app.py`.

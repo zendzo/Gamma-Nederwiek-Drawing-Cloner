@@ -6,6 +6,7 @@ from pathlib import Path
 import hashlib
 import json
 import os
+import threading
 import time
 import traceback
 
@@ -22,9 +23,15 @@ class PipelineWorker(QThread):
         self.operation = operation
         self.payload = payload
         self.cancel_requested = False
+        self._stop = threading.Event()
 
     def cancel(self):
         self.cancel_requested = True
+        self._stop.set()
+
+    @property
+    def stop_event(self):
+        return self._stop
 
     @staticmethod
     def _sha(path):
@@ -83,8 +90,30 @@ class PipelineWorker(QThread):
             return {x['identity']:x for x in data.get('results',[]) if x.get('status')=='LOCAL_PAIR_WRITTEN_NOT_VALIDATED'}
         except Exception:return {}
 
-    def _writer_reusable(self, record, plan, source_sha=None):
+    @staticmethod
+    def _plan_sha(plan):
+        """Hash the executable action set so plan edits invalidate the checkpoint.
+
+        Source and output hashes alone are not enough: editing the plan (adding a
+        cleaned handle, changing a target value) leaves both untouched, and the
+        checkpoint would then hand back a DWG that no longer matches the plan.
+        """
+        actions = [
+            {key: action.get(key, "") for key in (
+                "output_revision", "handle", "action", "old_value", "new_value",
+                "target_field", "reason",
+            )}
+            for action in plan.get("actions", [])
+        ]
+        actions.sort(key=lambda item: (item["output_revision"], item["handle"], item["target_field"]))
+        payload = json.dumps(actions, sort_keys=True, default=str, ensure_ascii=False)
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _writer_reusable(self, record, plan, source_sha=None, plan_sha=None):
         if not record:return False
+        # Checkpoints written before 0.4C.7 have no plan hash and are never reused:
+        # recomputing one pair is cheap compared to publishing a stale drawing.
+        if not plan_sha or record.get('plan_sha256')!=plan_sha:return False
         results={x.get('output_revision'):x for x in record.get('outputs',[])}
         if set(results)!={'A','00'}:return False
         source=Path(plan['primary_geometry'])
@@ -94,12 +123,13 @@ class PipelineWorker(QThread):
             if not p.is_file() or self._sha(p)!=x.get('sha256'):return False
         return True
 
-    def _write_writer_checkpoint(self, results, total, cancelled, skipped, plans, source_hash=None):
+    def _write_writer_checkpoint(self, results, total, cancelled, skipped, plans, source_hash=None, plan_hash=None):
         source_hash=source_hash or {p['identity']:self._sha(p['primary_geometry']) for p in plans if Path(p['primary_geometry']).is_file()}
+        plan_hash=plan_hash or {}
         rows=[]
         for result in results:
-            row=asdict(result);row['source_sha256']=source_hash.get(result.identity,'');rows.append(row)
-        payload={'schema':'GNI-Stable-Writer-Checkpoint-0.4C.4','updated_at':datetime.now().astimezone().isoformat(),'total_pairs':total,'completed_pairs':len(results),'skipped':skipped,'cancelled':cancelled,'results':rows}
+            row=asdict(result);row['source_sha256']=source_hash.get(result.identity,'');row['plan_sha256']=plan_hash.get(result.identity,'');rows.append(row)
+        payload={'schema':'GNI-Stable-Writer-Checkpoint-0.4C.7','updated_at':datetime.now().astimezone().isoformat(),'total_pairs':total,'completed_pairs':len(results),'skipped':skipped,'cancelled':cancelled,'results':rows}
         path=self._writer_checkpoint;path.parent.mkdir(parents=True,exist_ok=True);tmp=path.with_suffix('.json.tmp');tmp.write_text(json.dumps(payload,indent=2,ensure_ascii=False),encoding='utf-8');os.replace(tmp,path)
 
     def _run_writer(self):
@@ -108,26 +138,38 @@ class PipelineWorker(QThread):
         writer=StableExternalActionWriter(self.payload['core'],self.payload['lisp'],self.payload['app'])
         workers=max(1,int(self.payload.get('workers') or writer.max_workers))
         source_hash={p['identity']:self._sha(p['primary_geometry']) for p in plans if Path(p['primary_geometry']).is_file()}
+        plan_hash={p['identity']:self._plan_sha(p) for p in plans}
         todo=[]
         for plan in plans:
             old=previous.get(plan['identity'])
-            if self._writer_reusable(old,plan,source_hash.get(plan['identity'])):
+            if self._writer_reusable(old,plan,source_hash.get(plan['identity']),plan_hash.get(plan['identity'])):
                 results.append(StablePairResult(old['identity'],old['drawing_type'],old['status'],[StableOutput(**x) for x in old['outputs']],list(old.get('errors',[]))))
                 skipped+=1
             else:todo.append(plan)
         if skipped:self.progress.emit(skipped,total,'','PAIR',f'Reused {skipped} valid checkpoint(s)')
-        last=[0.0]
+        last=[0.0];fatal=threading.Event()
         def save(force=False):
             now=time.monotonic()
             if force or now-last[0]>=5:
-                self._write_writer_checkpoint(results,total,False,skipped,plans,source_hash);last[0]=now
+                self._write_writer_checkpoint(results,total,False,skipped,plans,source_hash,plan_hash);last[0]=now
         def on_result(result):
-            results.append(result);self.progress.emit(len(results),total,result.identity,'PAIR',result.status);save()
-        writer.run_many(todo,workers=workers,on_result=on_result,should_cancel=lambda:self.cancel_requested)
-        order={p['identity']:index for index,p in enumerate(plans)};results.sort(key=lambda item:order.get(item.identity,10**9))
-        cancelled=self.cancel_requested and len(results)<total
-        report=writer.write_report(self.payload['bundle_root'],results)
-        self._write_writer_checkpoint(results,total,cancelled,skipped,plans,source_hash)
+            # Runs on pool threads: a raise here would kill a worker mid-pool and
+            # leave run_many's wait() spin forever.
+            if fatal.is_set():return
+            try:
+                results.append(result);self.progress.emit(len(results),total,result.identity,'PAIR',result.status);save()
+            except Exception:
+                fatal.set()
+                raise
+        try:
+            writer.run_many(todo,workers=workers,on_result=on_result,should_cancel=lambda:self.cancel_requested)
+        finally:
+            order={p['identity']:index for index,p in enumerate(plans)}
+            results.sort(key=lambda item:order.get(item.identity,10**9))
+            cancelled=self.cancel_requested and len(results)<total
+            report=writer.write_report(self.payload['bundle_root'],results)
+            self._write_writer_checkpoint(results,total,cancelled,skipped,plans,source_hash,plan_hash)
+        if fatal.is_set():raise RuntimeError('WRITER_CHECKPOINT_WRITE_FAILED: see the log for the underlying error')
         return results,report,cancelled,skipped
 
     def _run_validator(self):
@@ -148,16 +190,25 @@ class PipelineWorker(QThread):
                 results.append(ValidationPair(record['identity'],record['drawing_type'],record['status'],[ValidationOutput(**x) for x in record['outputs']],list(record.get('errors',[]))));skipped+=1
             else:todo.append(pair)
         if skipped:self.progress.emit(skipped,total,'','PAIR',f'Reused {skipped} validated checkpoint(s)')
-        last=[0.0]
+        last=[0.0];fatal=threading.Event()
         def save(force=False):
             now=time.monotonic()
             if force or now-last[0]>=5:
-                payload={'schema':'GNI-Reopen-Checkpoint-0.4C.4','total_pairs':total,'completed_pairs':len(results),'skipped':skipped,'cancelled':False,'results':[asdict(x) for x in results]};tmp=checkpoint.with_suffix('.tmp');tmp.write_text(json.dumps(payload,indent=2),encoding='utf-8');os.replace(tmp,checkpoint);last[0]=now
+                payload={'schema':'GNI-Reopen-Checkpoint-0.4C.7','total_pairs':total,'completed_pairs':len(results),'skipped':skipped,'cancelled':False,'results':[asdict(x) for x in results]};tmp=checkpoint.with_suffix('.tmp');tmp.write_text(json.dumps(payload,indent=2),encoding='utf-8');os.replace(tmp,checkpoint);last[0]=now
         def on_result(result):
-            results.append(result);self.progress.emit(len(results),total,result.identity,'PAIR',result.status);save()
-        validator.validate_many(todo,workers=workers,on_result=on_result,should_cancel=lambda:self.cancel_requested)
-        order={pair['identity']:index for index,pair in enumerate(pairs)};results.sort(key=lambda item:order.get(item.identity,10**9))
-        report=validator.write_report(self.payload['bundle_root'],results);return results,report,self.cancel_requested and len(results)<total,skipped
+            if fatal.is_set():return
+            try:
+                results.append(result);self.progress.emit(len(results),total,result.identity,'PAIR',result.status);save()
+            except Exception:
+                fatal.set()
+                raise
+        try:
+            validator.validate_many(todo,workers=workers,on_result=on_result,should_cancel=lambda:self.cancel_requested)
+        finally:
+            order={pair['identity']:index for index,pair in enumerate(pairs)};results.sort(key=lambda item:order.get(item.identity,10**9))
+            report=validator.write_report(self.payload['bundle_root'],results)
+        if fatal.is_set():raise RuntimeError('VALIDATOR_CHECKPOINT_WRITE_FAILED: see the log for the underlying error')
+        return results,report,self.cancel_requested and len(results)<total,skipped
 
     def _run_dryrun(self):
         from revision.atomic_publish_dry_run import AtomicPublisherDryRun
@@ -199,3 +250,16 @@ class BackgroundOperationController(QObject):
         a,b,c,d,e=self.last;elapsed=int(time.monotonic()-self.started);dots='.'*((elapsed%3)+1);self.status.emit(f'{self.operation}: {a} of {b} | {c} | {d} | {e}{dots} | elapsed {elapsed//60:02d}:{elapsed%60:02d}')
     def _completed(self,*args):self.timer.stop();self.finished.emit(*args);self.worker=None
     def _failed(self,*args):self.timer.stop();self.failed.emit(*args);self.worker=None
+
+    def shutdown(self, timeout_ms=5000):
+        """Stop the worker thread so Qt does not destroy a running QThread."""
+        self.timer.stop()
+        worker = self.worker
+        if not worker or not worker.isRunning():
+            self.worker = None
+            return True
+        worker.cancel()
+        if worker.wait(timeout_ms):
+            self.worker = None
+            return True
+        return False

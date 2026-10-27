@@ -50,14 +50,26 @@ class Main(QMainWindow):
   for button in self.stage_buttons.values():button.setEnabled(bool(on) and not self._busy)
  def stage_report_path(self,key):
   name=STAGE_REPORTS.get(key);return self.reports_root()/name if name else None
+ def _report_state(self,key):
+  """Return 'complete', 'incomplete' or 'missing' for a stage report."""
+  path=self.stage_report_path(key)
+  if not path or not path.is_file():return 'missing'
+  if key not in ('discovery','plan'):return 'complete'
+  import json
+  try:payload=json.loads(path.read_text(encoding='utf-8'))
+  except (OSError,ValueError):return 'missing'
+  if not isinstance(payload,dict):return 'missing'
+  # A cancelled sweep still writes its report; without this flag the pipeline
+  # advanced on partial discovery/plan data. Reports written before 0.4C.7 have
+  # no flag and keep the old behaviour so upgrades do not re-run everything.
+  if payload.get('complete') is False:return 'incomplete'
+  return 'complete'
  def _stage_complete(self,key):
   if key=='scan':return bool(self.files)
   if key in self._skipped:return True
-  path=self.stage_report_path(key)
-  if not path or not path.is_file():return False
-  if key=='discovery':
-   root=self.reports_root()
-   return (root/'title_block_discovery_report.json').is_file() and (root/'title_block_discovery_fields.csv').is_file()
+  state=self._report_state(key)
+  if state!='complete':return False
+  if key=='discovery':return (self.reports_root()/'title_block_discovery_fields.csv').is_file()
   return True
  def next_stage(self):
   if not self.files:return ('scan','Scan source')
@@ -73,6 +85,7 @@ class Main(QMainWindow):
    if key in self._skipped:state='SKIPPED'
    elif key==self._running_stage:state='RUNNING'
    elif self._stage_complete(key):state='DONE'
+   elif self._report_state(key)=='incomplete':state='INCOMPLETE (rerun)'
    else:state='PENDING'
    for column,value in enumerate([str(row+1),label,state,path.name if path else '(this session)']):self.stage_tbl.setItem(row,column,QTableWidgetItem(value))
    if key==nxt_key:self.stage_tbl.selectRow(row)
@@ -149,16 +162,30 @@ class Main(QMainWindow):
   try:
    self.save();root=Path(self.dst.text())/self.bundle.text();plan=root/'_GNI_REPORTS'/'revision_pilot_write_plan.json'
    if not plan.is_file():QMessageBox.critical(self,'Stable Writer','Build Revision Plan first.');return False
-   plans=StableExternalActionWriter.load_ready_plans(plan);self._start_bg('writer',{'plans':plans,'core':self.exe.text(),'lisp':BASE/'lisp'/'stable_external_writer.lsp','app':BASE,'bundle_root':root,'workers':int(self.workers.value())});return True
+   plans,rejected=StableExternalActionWriter.load_ready_plans(plan,return_rejected=True)
+   if rejected:self._report_rejected('Stable Writer',rejected)
+   self._start_bg('writer',{'plans':plans,'core':self.exe.text(),'lisp':BASE/'lisp'/'stable_external_writer.lsp','app':BASE,'bundle_root':root,'workers':int(self.workers.value())});return True
   except Exception as e:QMessageBox.critical(self,'Stable Writer failed',str(e));return False
  def run_reopen_validator(self):
   try:
-   self.save();root=Path(self.dst.text())/self.bundle.text();pairs=StableReopenValidator.load_writer_results(root/'_GNI_REPORTS'/'stable_external_writer_report.json');self._start_bg('validator',{'pairs':pairs,'core':self.exe.text(),'lisp':BASE/'lisp'/'reopen_validator.lsp','app':BASE,'bundle_root':root,'workers':int(self.workers.value())});return True
+   self.save();root=Path(self.dst.text())/self.bundle.text();pairs,rejected=StableReopenValidator.load_writer_results(root/'_GNI_REPORTS'/'stable_external_writer_report.json',return_rejected=True)
+   if rejected:self._report_rejected('Reopen Validator',rejected)
+   self._start_bg('validator',{'pairs':pairs,'core':self.exe.text(),'lisp':BASE/'lisp'/'reopen_validator.lsp','app':BASE,'bundle_root':root,'workers':int(self.workers.value())});return True
   except Exception as e:QMessageBox.critical(self,'Reopen Validator failed',str(e));return False
  def run_atomic_publish_dry_run(self):
   try:
-   self.save();root=Path(self.dst.text())/self.bundle.text();pairs=AtomicPublisherDryRun.load_validated_pairs(root);self._start_bg('dryrun',{'pairs':pairs,'app':BASE,'bundle_root':root});return True
+   self.save();root=Path(self.dst.text())/self.bundle.text();pairs,rejected=AtomicPublisherDryRun.load_validated_pairs(root,return_rejected=True)
+   if rejected:self._report_rejected('Atomic Dry Run',rejected)
+   self._start_bg('dryrun',{'pairs':pairs,'app':BASE,'bundle_root':root});return True
   except Exception as e:QMessageBox.critical(self,'Atomic Dry Run failed',str(e));return False
+ def _report_rejected(self,stage,rejected):
+  """Record plans the gate dropped so the batch can continue without them."""
+  root=self.reports_root();root.mkdir(parents=True,exist_ok=True);path=root/'gate_rejected.json'
+  if not rejected:
+   path.unlink(missing_ok=True);return
+  payload={'schema':'GNI-Gate-Rejected-0.4C.7','generated_at':__import__('datetime').datetime.now().astimezone().isoformat(),'stage':stage,'count':len(rejected),'rejected':rejected}
+  path.write_text(__import__('json').dumps(payload,indent=2,ensure_ascii=False),encoding='utf-8')
+  self.status.setText(f'{stage}: {len(rejected)} drawing(s) skipped by the gate - see gate_rejected.json')
  def run_atomic_publisher(self):
   try:
    self.save();root=Path(self.dst.text())/self.bundle.text();packages=AtomicPublisher.load_ready_transactions(root);overwrites=sum(f.get('destination_exists',False) for p in packages for f in p['dry_run'].get('files',[]));answer=QMessageBox.question(self,'Confirm Atomic Publishing',f'Publish {len(packages)} validated pair(s)?\nExisting files: {overwrites}\nBundle: {root}',QMessageBox.Yes|QMessageBox.No,QMessageBox.No)
@@ -181,6 +208,23 @@ class Main(QMainWindow):
   self._running_stage=None;self._chain=False;self._set_pipeline_busy(False);self.prog.setRange(0,100);self.prog.setValue(0);self.refresh_pipeline();QMessageBox.critical(self,'PDF Publisher failed',message)
  def status_update_safe(self,message):
   self.status.setText(message)
+ def closeEvent(self,event):
+  workers=[w for w in (getattr(self,'discovery_worker',None),getattr(self,'plan_worker',None),getattr(self,'pdf_worker',None)) if w is not None and w.isRunning()]
+  busy=bool(workers) or bool(self.bg.worker and self.bg.worker.isRunning())
+  if busy:
+   answer=QMessageBox.question(self,'Stop and exit?','A migration stage is still running.\n\nClosing now cancels it: the current drawing finishes its safe unit, then accoreconsole processes are stopped. Partial results stay resumable via the checkpoints.\n\nStop and exit?',QMessageBox.Yes|QMessageBox.No,QMessageBox.No)
+   if answer!=QMessageBox.Yes:event.ignore();return
+  timer=getattr(self,'_heartbeat',None)
+  if timer:timer.stop()
+  for worker in workers:
+   if hasattr(worker,'cancel'):worker.cancel()
+  from runtime.process_tracking import child_registry
+  child_registry.begin_shutdown()
+  for worker in workers:
+   if not worker.wait(5000):QMessageBox.warning(self,'Background operation',f'{worker.__class__.__name__} did not stop in 5 seconds and will be abandoned.')
+  if not self.bg.shutdown(5000):QMessageBox.warning(self,'Background operation','The background operation did not stop in 5 seconds and will be abandoned.')
+  child_registry.terminate_all()
+  event.accept()
  def _set_pipeline_busy(self,busy):
   self._busy=busy;self.primary.setEnabled(not busy);self.workers.setEnabled(not busy);self.cloneb.setEnabled(not busy);self._sync_advanced_buttons(self.adv.isChecked());self.cancelb.setEnabled(busy)
  def _start_bg(self,operation,payload):
@@ -299,4 +343,11 @@ class Main(QMainWindow):
  def do_scan(self):
   try:self.save();self._start_bg('scan',{'source':self.src.text()});return True
   except Exception as e:QMessageBox.critical(self,'Scan failed',str(e));return False
-if __name__=='__main__':app=QApplication(sys.argv);app.setStyle('Fusion');w=Main();w.show();sys.exit(app.exec())
+ def prune_temp_jobs(self):
+  """Drop Core Console job folders older than a week; never fatal on startup."""
+  try:
+   from runtime.process_tracking import gni_temp_root,prune_job_root
+   removed,failed=prune_job_root(gni_temp_root(),keep_days=7)
+   if removed or failed:self.status.setText(f'Temporary jobs: {removed} stale job folder(s) removed'+(f', {failed} could not be removed' if failed else ''))
+  except Exception:pass
+if __name__=='__main__':app=QApplication(sys.argv);app.setStyle('Fusion');w=Main();w.prune_temp_jobs();w.show();sys.exit(app.exec())

@@ -90,7 +90,8 @@ class AtomicPublisherDryRun:
         return json.loads(path.read_text(encoding="utf-8"))
 
     @classmethod
-    def load_validated_pairs(cls, bundle_root):
+    def load_validated_pairs(cls, bundle_root, return_rejected=False):
+        """Return pairs ready for a dry run, with rejects reported separately."""
         reports = Path(bundle_root).resolve() / "_GNI_REPORTS"
         writer = cls._load_json(
             reports / "stable_external_writer_report.json",
@@ -109,14 +110,14 @@ class AtomicPublisherDryRun:
         for validated in validation.get("results", []):
             identity = validated.get("identity", "")
             if validated.get("status") != "VALIDATED":
-                rejected.append(identity + "=VALIDATION_NOT_PASSED")
+                rejected.append({"identity": identity, "errors": ["VALIDATION_NOT_PASSED"]})
                 continue
             written = writer_by_identity.get(identity)
             if not written:
-                rejected.append(identity + "=WRITER_PAIR_NOT_FOUND")
+                rejected.append({"identity": identity, "errors": ["WRITER_PAIR_NOT_FOUND"]})
                 continue
             if written.get("status") != "LOCAL_PAIR_WRITTEN_NOT_VALIDATED":
-                rejected.append(identity + "=WRITER_PAIR_STATUS_INVALID")
+                rejected.append({"identity": identity, "errors": ["WRITER_PAIR_STATUS_INVALID"]})
                 continue
             validation_outputs = {
                 item.get("output_revision"): item
@@ -127,16 +128,16 @@ class AtomicPublisherDryRun:
                 for item in written.get("outputs", [])
             }
             if set(validation_outputs) != {"A", "00"}:
-                rejected.append(identity + "=VALIDATION_PAIR_INCOMPLETE")
+                rejected.append({"identity": identity, "errors": ["VALIDATION_PAIR_INCOMPLETE"]})
                 continue
             if set(writer_outputs) != {"A", "00"}:
-                rejected.append(identity + "=WRITER_PAIR_INCOMPLETE")
+                rejected.append({"identity": identity, "errors": ["WRITER_PAIR_INCOMPLETE"]})
                 continue
             if any(
                 validation_outputs[mode].get("status") != "VALIDATED"
                 for mode in ("A", "00")
             ):
-                rejected.append(identity + "=OUTPUT_VALIDATION_INCOMPLETE")
+                rejected.append({"identity": identity, "errors": ["OUTPUT_VALIDATION_INCOMPLETE"]})
                 continue
             accepted.append(
                 {
@@ -148,12 +149,13 @@ class AtomicPublisherDryRun:
                     "validation": validated,
                 }
             )
-        if rejected:
-            raise AtomicPublishDryRunError(
-                "PAIR_GATE_REJECTED:" + ";".join(rejected)
-            )
         if not accepted:
-            raise AtomicPublishDryRunError("NO_VALIDATED_PAIRS")
+            detail = ";".join(item["identity"] + "=" + ",".join(item["errors"]) for item in rejected)
+            raise AtomicPublishDryRunError(
+                "PAIR_GATE_REJECTED:" + detail if rejected else "NO_VALIDATED_PAIRS"
+            )
+        if return_rejected:
+            return accepted, rejected
         return accepted
 
     def _destination(self, identity, drawing_type, output_revision):

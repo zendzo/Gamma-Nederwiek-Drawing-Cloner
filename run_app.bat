@@ -121,17 +121,21 @@ if errorlevel 1 (
 
 rem ------------------------------------------------------------
 rem 5. Start the application using the activated environment.
+rem    app_modern.py runs the same Main controller as app.py but adds the
+rem    sidebar shell; it falls back to app.py if the file is missing.
 rem ------------------------------------------------------------
-if not exist "app.py" (
-    echo [ERROR] app.py was not found in:
+set "APP_ENTRY=app.py"
+if exist "app_modern.py" set "APP_ENTRY=app_modern.py"
+if not exist "%APP_ENTRY%" (
+    echo [ERROR] %APP_ENTRY% was not found in:
     echo        %CD%
     pause
     exit /b 1
 )
 
 echo.
-echo [INFO] Starting GammaNederwiek...
-python "app.py"
+echo [INFO] Starting GammaNederwiek (%APP_ENTRY%)...
+python "%APP_ENTRY%"
 set "APP_EXIT=%ERRORLEVEL%"
 
 if not "%APP_EXIT%"=="0" (
