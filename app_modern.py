@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (
 import app as legacy
 
 
-APP_TITLE = "Gamma Cloner"
+APP_TITLE = "Project Cloner"
 APP_SUBTITLE = "Revision Migration Control Center"
 
 
@@ -147,6 +147,62 @@ QTextEdit, QPlainTextEdit, QListWidget, QTableWidget {
 QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus,
 QTextEdit:focus, QPlainTextEdit:focus, QTableWidget:focus {
     border: 1px solid #2563EB;
+}
+QSpinBox#workerInput {
+    min-width: 82px;
+    min-height: 36px;
+    padding: 0 34px 0 12px;
+    background-color: #FFFFFF;
+    color: #0F172A;
+    border: 1px solid #CBD5E1;
+    border-radius: 9px;
+    font-weight: 700;
+    selection-background-color: #DBEAFE;
+}
+
+QSpinBox#workerInput:hover {
+    border-color: #94A3B8;
+    background-color: #F8FAFC;
+}
+
+QSpinBox#workerInput:focus {
+    border: 2px solid #3B82F6;
+    background-color: #FFFFFF;
+}
+
+QSpinBox#workerInput::up-button,
+QSpinBox#workerInput::down-button {
+    subcontrol-origin: border;
+    width: 28px;
+    background-color: #EFF6FF;
+    border-left: 1px solid #BFDBFE;
+}
+
+QSpinBox#workerInput::up-button {
+    subcontrol-position: top right;
+    border-top-right-radius: 8px;
+    border-bottom: 1px solid #BFDBFE;
+}
+
+QSpinBox#workerInput::down-button {
+    subcontrol-position: bottom right;
+    border-bottom-right-radius: 8px;
+}
+
+QSpinBox#workerInput::up-button:hover,
+QSpinBox#workerInput::down-button:hover {
+    background-color: #DBEAFE;
+}
+
+QSpinBox#workerInput::up-button:pressed,
+QSpinBox#workerInput::down-button:pressed {
+    background-color: #BFDBFE;
+}
+
+QLabel#workerLabel {
+    background-color: transparent;
+    color: #475569;
+    font-weight: 600;
 }
 QPushButton {
     background-color: #334155;
@@ -412,6 +468,12 @@ class ModernMain(legacy.Main):
     def _apply_widget_roles(self) -> None:
         if hasattr(self, "primary"):
             self.primary.setObjectName("primaryButton")
+        # The QSS targets QSpinBox#workerInput / QLabel#workerLabel; without these
+        # object names the worker controls fell back to the default Fusion look.
+        if hasattr(self, "workers"):
+            self.workers.setObjectName("workerInput")
+        if hasattr(self, "adv"):
+            self.adv.setObjectName("advancedGroup")
         for line_edit in self.findChildren(legacy.QLineEdit):
             line_edit.setMinimumHeight(38)
             line_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -422,6 +484,9 @@ class ModernMain(legacy.Main):
         if hasattr(self, "adv"):
             self.adv.setVisible(True)
             self.adv.setMinimumHeight(82)
+        for widget in self.findChildren(QLabel):
+            if widget.text().strip() == "Parallel workers":
+                widget.setObjectName("workerLabel")
         for widget in self.findChildren(QPushButton):
             text = widget.text().strip().lower()
             if any(token in text for token in ("cancel", "stop")):
@@ -463,94 +528,11 @@ class ModernMain(legacy.Main):
         self.modern_status_badge.style().unpolish(self.modern_status_badge)
         self.modern_status_badge.style().polish(self.modern_status_badge)
 
-    # Publish-gate loop protection retained in the modern launcher.
-    def _stage_complete(self, key: str) -> bool:
-        if key == "scan":
-            return bool(self.files)
-        if key in self._skipped:
-            return True
-        path = self.stage_report_path(key)
-        if key == "discovery":
-            root = self.reports_root()
-            return (
-                (root / "title_block_discovery_report.json").is_file()
-                and (root / "title_block_discovery_fields.csv").is_file()
-            )
-        return bool(path and path.is_file())
-
-    def next_stage(self):
-        if not self.files:
-            return "scan", "Scan source"
-        for key, label in legacy.PIPELINE:
-            if key == "scan" or key in self._skipped:
-                continue
-            if not self._stage_complete(key):
-                return key, label
-        return None
-
-    def refresh_pipeline(self) -> None:
-        next_item = self.next_stage()
-        next_key = next_item[0] if next_item else ""
-        self.stage_tbl.setRowCount(len(legacy.PIPELINE))
-        for row, (key, label) in enumerate(legacy.PIPELINE):
-            path = self.stage_report_path(key)
-            if key in self._skipped:
-                state = "SKIPPED"
-            elif key == self._running_stage:
-                state = "RUNNING"
-            elif self._stage_complete(key):
-                state = "DONE"
-            else:
-                state = "PENDING"
-            values = [str(row + 1), label, state, path.name if path else "(this session)"]
-            for column, value in enumerate(values):
-                self.stage_tbl.setItem(row, column, legacy.QTableWidgetItem(value))
-            if key == next_key:
-                self.stage_tbl.selectRow(row)
-        self.refresh_primary()
-
-    def _advance_pipeline(self, completed: str) -> None:
-        self._running_stage = None
-        self.refresh_pipeline()
-        if not self._chain:
-            return
-        if completed not in legacy.AUTO_STAGES:
-            self._chain = False
-            return
-        if not self._stage_complete(completed):
-            self._chain = False
-            self.refresh_pipeline()
-            legacy.QMessageBox.warning(
-                self,
-                "Pipeline stopped safely",
-                f"{completed} finished, but its required report was not found.\n\n"
-                "Automatic execution was stopped to prevent an infinite loop. "
-                "Review the Reports page, then run the stage again from Advanced.",
-            )
-            return
-        completed_index = legacy.AUTO_STAGES.index(completed)
-        next_key = (
-            legacy.AUTO_STAGES[completed_index + 1]
-            if completed_index + 1 < len(legacy.AUTO_STAGES)
-            else None
-        )
-        if next_key:
-            QTimer.singleShot(30, lambda stage=next_key: self.run_stage(stage))
-            return
-        self._chain = False
-        self.refresh_pipeline()
-        next_item = self.next_stage()
-        if next_item:
-            self.status.setText(
-                "Non-destructive stages complete. Review the dry-run report, then publish explicitly."
-            )
-            legacy.QMessageBox.information(
-                self,
-                "Ready to publish",
-                "All non-destructive stages are complete.\n\n"
-                f"Next action: {self.primary.text()}\n\n"
-                "Review the dry-run report before publishing.",
-            )
+    # Publish-gate loop protection lives in app.Main. ModernMain deliberately does
+    # not re-define next_stage/_stage_complete/refresh_pipeline/_advance_pipeline:
+    # the previous copies drifted from the originals (skipped-stage handling and
+    # refresh_primary were both lost), which is exactly the bug this shell exists
+    # to avoid. tests/test_app_shell_parity.py enforces the rule.
 
 
 def main() -> int:
@@ -565,60 +547,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
-# QSpinBox#workerInput {
-#     min-width: 82px;
-#     min-height: 36px;
-#     padding: 0 34px 0 12px;
-#     background-color: #FFFFFF;
-#     color: #0F172A;
-#     border: 1px solid #CBD5E1;
-#     border-radius: 9px;
-#     font-weight: 700;
-#     selection-background-color: #DBEAFE;
-# }
-
-# QSpinBox#workerInput:hover {
-#     border-color: #94A3B8;
-#     background-color: #F8FAFC;
-# }
-
-# QSpinBox#workerInput:focus {
-#     border: 2px solid #3B82F6;
-#     background-color: #FFFFFF;
-# }
-
-# QSpinBox#workerInput::up-button,
-# QSpinBox#workerInput::down-button {
-#     subcontrol-origin: border;
-#     width: 28px;
-#     background-color: #EFF6FF;
-#     border-left: 1px solid #BFDBFE;
-# }
-
-# QSpinBox#workerInput::up-button {
-#     subcontrol-position: top right;
-#     border-top-right-radius: 8px;
-#     border-bottom: 1px solid #BFDBFE;
-# }
-
-# QSpinBox#workerInput::down-button {
-#     subcontrol-position: bottom right;
-#     border-bottom-right-radius: 8px;
-# }
-
-# QSpinBox#workerInput::up-button:hover,
-# QSpinBox#workerInput::down-button:hover {
-#     background-color: #DBEAFE;
-# }
-
-# QSpinBox#workerInput::up-button:pressed,
-# QSpinBox#workerInput::down-button:pressed {
-#     background-color: #BFDBFE;
-# }
-
-# QLabel#workerLabel {
-#     background-color: transparent;
-#     color: #475569;
-#     font-weight: 600;
-# }

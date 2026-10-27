@@ -107,51 +107,12 @@ class RevisionWritePlanBuilder:
   return bounds
  @classmethod
  def _detect_spatial_rows(cls,identity,drawing_type,rows):
-  header=cls._find_header(rows)
-  if not header:return [],['REVISION_HEADER_NOT_FOUND']
-  bounds=cls._column_bounds(header);header_y=sum(r['_y'] for r in header)/len(header)
-  min_x=min(x for _,_,_,x,_ in bounds);max_x=max(x for _,_,_,x,_ in bounds)
-  # Revision rows are below the header and limited to the detected table width.
-  candidates=[]
-  for row in rows:
-   point=cls._xy(row)
-   if not point:continue
-   x,y=point
-   if y>=header_y-0.5 or x<min_x-2.5 or x>max_x+2.5:continue
-   item=dict(row);item['_x']=x;item['_y']=y
-   for field,left,right,center,hrow in bounds:
-    if left<=x<right:item['_column']=field;item['_header_x']=center;item['_header_handle']=hrow.get('handle','');candidates.append(item);break
-  detected=[]
-  for cluster in cls._cluster_y(candidates,0.35):
-   cells={}
-   for item in cluster:
-    field=item['_column'];current=cells.get(field)
-    if current is None or abs(item['_x']-item['_header_x'])<abs(current['_x']-current['_header_x']):cells[field]=item
-   rev=cls._norm(cells.get('REVISION',{}).get('value',''))
-   date_value=str(cells.get('REVISION_DATE',{}).get('value','')).strip()
-   purpose=cls._norm(cells.get('REVISION_PURPOSE',{}).get('value',''))
-   change=cls._norm(cells.get('REVISION_CHANGE_LOG',{}).get('value',''))
-   if rev not in ('A','00'):continue
-   row_kind=rev
-   score=30
-   evidence=['HEADER_ANCHORED','Y_CLUSTERED','REVISION_VALUE_MATCH']
-   if re.fullmatch(r'\d{1,2}[./-]\d{1,2}[./-]\d{4}|\d{4}[./-]\d{1,2}[./-]\d{1,2}',date_value):score+=25;evidence.append('DATE_VALUE_MATCH')
-   expected='ISSUED FOR COMMENTS' if rev=='A' else 'APPROVED FOR CONSTRUCTION'
-   if expected in purpose:score+=25;evidence.append('PURPOSE_VALUE_MATCH')
-   if expected in change:score+=10;evidence.append('CHANGE_LOG_VALUE_MATCH')
-   if any(k in cells for k in ('DRAWN_BY','CHECKED_BY','APPROVED_BY')):score+=10;evidence.append('PERSONNEL_CELL_PRESENT')
-   confidence='HIGH' if score>=80 else 'MEDIUM' if score>=65 else 'LOW'
-   def pair(field):
-    item=cells.get(field,{})
-    return item.get('handle',''),item.get('value','')
-   rh,rv=pair('REVISION');dh,dv=pair('REVISION_DATE');ph,pv=pair('REVISION_PURPOSE');ch,cv=pair('REVISION_CHANGE_LOG');drh,drv=pair('DRAWN_BY');ckh,ckv=pair('CHECKED_BY');aph,apv=pair('APPROVED_BY')
-   detected.append(SpatialRevisionRow(identity,drawing_type,row_kind,sum(x['_y'] for x in cluster)/len(cluster),header_y,rh,rv,dh,dv,ph,pv,ch,cv,drh,drv,ckh,ckv,aph,apv,confidence,score,';'.join(evidence),'' if confidence=='HIGH' else 'MANUAL_REVIEW_REQUIRED'))
-  warnings=[]
-  for kind in ('A','00'):
-   matches=[r for r in detected if r.row_kind==kind]
-   if not matches:warnings.append('SPATIAL_ROW_NOT_FOUND:'+kind)
-   elif len(matches)>1:warnings.append('SPATIAL_ROW_AMBIGUOUS:'+kind+':'+str(len(matches)))
-  return detected,warnings
+  # Row 00 reconstruction (revision.recovery_00) used to be attached by
+  # monkey-patching this method at import time; call it explicitly so detector
+  # behaviour no longer depends on module import order.
+  from revision.adaptive_detection import to_spatial_rows
+  from revision.recovery_00 import detect_with_recovery
+  return to_spatial_rows(cls, SpatialRevisionRow, identity, drawing_type, rows, detect_with_recovery)
  @staticmethod
  def _format_date(template,value):
   text=str(template or '').strip()

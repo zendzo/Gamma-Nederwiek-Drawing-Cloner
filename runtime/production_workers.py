@@ -64,8 +64,10 @@ class DiscoveryWorker(QThread):
                 self._write_checkpoint(builder.bundle_root, results, total,
                                        self._cancel_requested)
                 self.progress.emit(index, total, identity, "Drawing completed")
-            json_path, csv_path = engine.write_report(builder.bundle_root, results)
             cancelled = self._cancel_requested and len(results) < total
+            json_path, csv_path = engine.write_report(
+                builder.bundle_root, results, complete=not cancelled
+            )
             self._write_checkpoint(builder.bundle_root, results, total, cancelled)
             self.completed.emit(
                 results, str(json_path), str(csv_path), cancelled
@@ -138,6 +140,7 @@ class ProductionPlanWorker(QThread):
                 self.progress.emit(index, total, identity, "Plan checkpoint saved")
             outputs = planner.write_reports(builder.bundle_root, plans)
             cancelled = self._cancel_requested and len(plans) < total
+            self._mark_plan_report_complete(builder.bundle_root, complete=not cancelled, cancelled=cancelled)
             self._write_index(fragments, plans, total, cancelled)
             self.completed.emit(
                 plans, *(str(path) for path in outputs), cancelled
@@ -163,15 +166,37 @@ class ProductionPlanWorker(QThread):
         os.replace(temporary, path)
 
     @staticmethod
+    def _mark_plan_report_complete(bundle_root, complete=True, cancelled=False):
+        """Stamp ``complete`` into the plan JSON so a cancelled run is detectable.
+
+        The planner writes ``revision_pilot_write_plan.json`` through several
+        layers (base -> cleanup -> completion), so the flag is added once here
+        rather than threaded through every writer signature.
+        """
+        path = Path(bundle_root) / "_GNI_REPORTS" / "revision_pilot_write_plan.json"
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        payload["complete"] = bool(complete)
+        payload["cancelled"] = bool(cancelled)
+        temporary = path.with_suffix(".json.tmp")
+        temporary.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        os.replace(temporary, path)
+
+    @staticmethod
     def _write_index(root, plans, total, cancelled):
         path = root / "index.json"
         payload = {
-            "schema": "GNI-Production-Plan-Index-0.4C.2E",
+            "schema": "GNI-Production-Plan-Index-0.4C.7",
             "version": RUNTIME_VERSION,
             "updated_at": datetime.now().astimezone().isoformat(),
             "total_drawings": total,
             "completed_drawings": len(plans),
             "cancelled": bool(cancelled),
+            "complete": not bool(cancelled),
             "ready": sum(str(item.status).startswith("READY") for item in plans),
             "blocked": sum(item.status == "BLOCKED" for item in plans),
             "plans": [
@@ -191,7 +216,8 @@ class ProductionPlanWorker(QThread):
             json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
         )
         os.replace(temporary, path)
+        # Called explicitly instead of patching _write_index at import time
+        # (GNI_MANUAL_CHECK_REPORT_0_4C_2F_1 used to monkey-patch this method).
+        from revision.recovery_00 import write_manual_check_report
 
-# GNI_MANUAL_CHECK_REPORT_0_4C_2F_1
-from revision.recovery_00 import install_worker_reports as _install_manual_reports
-_install_manual_reports(ProductionPlanWorker)
+        write_manual_check_report(root.parent, plans, cancelled)

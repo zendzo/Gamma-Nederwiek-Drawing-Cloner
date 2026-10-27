@@ -5,6 +5,8 @@ from pathlib import Path
 import csv, json, os, re, shutil, subprocess, tempfile, time, uuid
 from typing import Iterable, List
 
+from runtime.process_tracking import run_console
+
 DISCOVERY_VERSION='0.4A.2-full-replacement'
 
 @dataclass
@@ -100,7 +102,7 @@ class TitleBlockDiscoveryEngine:
         try:
             staged=self._copy(source,job/'input.dwg');tsv=job/'title_block_discovery.tsv';script=job/'discover.scr';result.tsv_path=str(tsv)
             script.write_text('\n'.join(['(setvar "FILEDIA" 0)','(setvar "CMDDIA" 0)',f'(setvar "TRUSTEDPATHS" "{self._q(self.runtime_root)}")',f'(load "{self._q(self.runtime_lisp)}")',f'(GNI:DISCOVER "{self._q(tsv)}")','_.QUIT','_Y','']),encoding='ascii',errors='replace')
-            cp=subprocess.run([str(self.core),'/i',str(staged),'/s',str(script),'/l','en-US'],capture_output=True,text=False,timeout=self.timeout,cwd=str(job));combined=self._decode(cp.stdout)+'\n'+self._decode(cp.stderr)
+            cp=run_console([str(self.core),'/i',str(staged),'/s',str(script),'/l','en-US'],capture_output=True,text=False,timeout=self.timeout,cwd=str(job));combined=self._decode(cp.stdout)+'\n'+self._decode(cp.stderr)
             with log.open('a',encoding='utf-8',errors='replace') as f:f.write(f'\nSTATUS=CORE_COMPLETED\nEXIT_CODE={cp.returncode}\n{combined}')
             upper=combined.upper()
             if self.LOAD_MARKER not in combined:raise RuntimeError('DISCOVERY_LISP_LOAD_FAILED')
@@ -120,8 +122,15 @@ class TitleBlockDiscoveryEngine:
         result.elapsed_seconds=round(time.time()-started,3);return result
     def discover_many(self,groups:Iterable):return [self.discover_group(g) for g in groups]
     @staticmethod
-    def write_report(bundle_root,results:List[DiscoveryResult]):
-        report=Path(bundle_root)/'_GNI_REPORTS';report.mkdir(parents=True,exist_ok=True);jp=report/'title_block_discovery_report.json';cp=report/'title_block_discovery_fields.csv';payload={'schema':'GNI-TitleBlock-Discovery-0.4A.2','generated_at':datetime.now().astimezone().isoformat(),'summary':{'drawings':len(results),'success':sum(x.status=='SUCCESS' for x in results),'failed':sum(x.status=='FAILED' for x in results),'fields':sum(len(x.fields) for x in results)},'results':[asdict(x) for x in results]};tmp=jp.with_suffix('.json.tmp');tmp.write_text(json.dumps(payload,indent=2,ensure_ascii=False),encoding='utf-8');os.replace(tmp,jp);names=list(DiscoveryField.__dataclass_fields__)
+    def write_report(bundle_root, results: List[DiscoveryResult], complete=True):
+        """Write the discovery handoff report.
+
+        ``complete`` is recorded in the payload so the GUI can tell a finished
+        sweep from a cancelled one; both used to produce an identical
+        ``title_block_discovery_report.json`` and the pipeline advanced on
+        partial data.
+        """
+        report=Path(bundle_root)/'_GNI_REPORTS';report.mkdir(parents=True,exist_ok=True);jp=report/'title_block_discovery_report.json';cp=report/'title_block_discovery_fields.csv';payload={'schema':'GNI-TitleBlock-Discovery-0.4A.2','generated_at':datetime.now().astimezone().isoformat(),'complete':bool(complete),'summary':{'drawings':len(results),'success':sum(x.status=='SUCCESS' for x in results),'failed':sum(x.status=='FAILED' for x in results),'fields':sum(len(x.fields) for x in results)},'results':[asdict(x) for x in results]};tmp=jp.with_suffix('.json.tmp');tmp.write_text(json.dumps(payload,indent=2,ensure_ascii=False),encoding='utf-8');os.replace(tmp,jp);names=list(DiscoveryField.__dataclass_fields__)
         with cp.open('w',encoding='utf-8-sig',newline='') as f:
             w=csv.DictWriter(f,fieldnames=names);w.writeheader()
             for r in results:

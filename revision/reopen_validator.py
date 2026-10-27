@@ -14,6 +14,8 @@ import uuid
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from typing import List
 
+from runtime.process_tracking import run_console
+
 VALIDATOR_VERSION = "0.4C.6-parallel-validator"
 
 
@@ -101,7 +103,12 @@ class StableReopenValidator:
         return str(Path(path).resolve()).replace("\\", "/").replace('"', '\\"')
 
     @classmethod
-    def load_writer_results(cls, report_path):
+    def load_writer_results(cls, report_path, return_rejected=False):
+        """Return validatable writer pairs, reporting rejected ones separately.
+
+        Previously any rejected pair raised and blocked the whole validation
+        batch, so one failed drawing stopped every other drawing from advancing.
+        """
         path = Path(report_path)
         if not path.is_file():
             raise ReopenValidationError(f"STABLE_WRITER_REPORT_NOT_FOUND:{path}")
@@ -110,17 +117,21 @@ class StableReopenValidator:
         rejected = []
         for pair in payload.get("results", []):
             if pair.get("status") != "LOCAL_PAIR_WRITTEN_NOT_VALIDATED":
-                rejected.append(pair.get("identity", "") + "=" + str(pair.get("status", "")))
+                rejected.append({"identity": pair.get("identity", ""), "errors": [str(pair.get("status", ""))]})
                 continue
             outputs = pair.get("outputs", [])
             if {item.get("output_revision") for item in outputs} != {"A", "00"}:
-                rejected.append(pair.get("identity", "") + "=PAIR_OUTPUTS_INCOMPLETE")
+                rejected.append({"identity": pair.get("identity", ""), "errors": ["PAIR_OUTPUTS_INCOMPLETE"]})
                 continue
             accepted.append(pair)
-        if rejected:
-            raise ReopenValidationError("WRITER_RESULTS_NOT_VALIDATABLE:" + ";".join(rejected))
         if not accepted:
-            raise ReopenValidationError("NO_LOCAL_PAIRS_TO_VALIDATE")
+            detail = ";".join(item["identity"] + "=" + ",".join(item["errors"]) for item in rejected)
+            raise ReopenValidationError(
+                "WRITER_RESULTS_NOT_VALIDATABLE:" + detail if rejected
+                else "NO_LOCAL_PAIRS_TO_VALIDATE"
+            )
+        if return_rejected:
+            return accepted, rejected
         return accepted
 
     @staticmethod
@@ -162,7 +173,7 @@ class StableReopenValidator:
             ]), encoding="ascii", errors="replace")
 
             flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
-            process = subprocess.run(
+            process = run_console(
                 [str(self.core), "/i", str(dwg), "/s", str(script), "/l", "en-US"],
                 capture_output=True, text=False, timeout=self.timeout,
                 cwd=str(session), creationflags=flags,

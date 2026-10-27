@@ -92,6 +92,13 @@ class TitleBlockCompletionPlanBuilder(NoDonorRevisionCleanupPlanBuilder):
         candidates.sort(key=lambda item: (abs(item[1]["_candidate_dy"]), abs(item[1]["_candidate_dx"])))
         return candidates[0][1], candidates[0][2]
 
+    @classmethod
+    def _find_current_revision(cls, rows):
+        # Adaptive detector used to be installed here by a monkey patch; calling
+        # it directly keeps behaviour identical without import-order coupling.
+        from revision.adaptive_detection import adaptive_current_revision
+        return adaptive_current_revision(cls, rows)
+
     @staticmethod
     def _existing_keys(plan):
         return {
@@ -309,7 +316,8 @@ class TitleBlockCompletionPlanBuilder(NoDonorRevisionCleanupPlanBuilder):
                 )
 
     def build(self, groups, discovery_csv):
-        plans = super().build(groups, discovery_csv)
+        from revision.recovery_00 import correct_plan_dates
+        plans = correct_plan_dates(super().build(groups, discovery_csv))
         all_rows = self._rows(discovery_csv)
         grouped: Dict[str, List[Dict]] = {}
         for row in all_rows:
@@ -354,11 +362,8 @@ class TitleBlockCompletionPlanBuilder(NoDonorRevisionCleanupPlanBuilder):
         os.replace(temporary, json_path)
         return outputs
 
-# GNI_ADAPTIVE_DETECTION_0_4C_2F
-from revision.adaptive_detection import install as _install_adaptive_detectors
-from revision.write_plan import RevisionWritePlanBuilder as _BasePlanBuilder, SpatialRevisionRow as _SpatialRevisionRow
-_install_adaptive_detectors(_BasePlanBuilder, _SpatialRevisionRow, NoDonorRevisionCleanupPlanBuilder, TitleBlockCompletionPlanBuilder)
+# GNI_ADAPTIVE_DETECTION_0_4C_2F: the detector implementations that were once
+# monkey-patched at import time are now called explicitly by
+# RevisionWritePlanBuilder._detect_spatial_rows, _find_current_revision (above)
+# and recovery_00.correct_plan_dates. Import has no side effects any more.
 
-# GNI_ROW00_RECOVERY_0_4C_2F_1
-from revision.recovery_00 import install as _install_row00_recovery
-_install_row00_recovery(_BasePlanBuilder, _SpatialRevisionRow, NoDonorRevisionCleanupPlanBuilder, TitleBlockCompletionPlanBuilder)
