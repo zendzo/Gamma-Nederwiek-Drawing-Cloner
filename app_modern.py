@@ -304,11 +304,22 @@ QStatusBar {
 
 PAGE_DESCRIPTIONS = {
     "Setup": "Choose the source, destination, AutoCAD console, and migration mapping.",
-    "Pipeline": "Run the controlled migration stages and monitor every handoff report.",
-    "Supporting Files": "Review and clone part lists, NC1 files, DXF files, and related assets.",
-    "Discovery": "Inspect title-block entities discovered from each DWG.",
+    "Drawing Candidates": "Run the controlled migration stages and monitor every handoff report.",
+    "Supporting File Clone": "Review and clone part lists, NC1 files, DXF files, and related assets.",
+    "Title Block Discovery": "Inspect title-block entities discovered from each DWG.",
     "Revision Plan": "Review proposed revision actions before controlled writing.",
     "Reports": "Open pipeline reports and verify the publish-gate evidence.",
+}
+
+# Sidebar captions, keyed by the real tab titles from app.py::Main.__init__.
+# Short label on the left, full tab title on the right.
+NAV_CAPTIONS = {
+    "Setup": "  Setup",
+    "Drawing Candidates": "  Drawing Candidates",
+    "Supporting File Clone": "  Supporting Files",
+    "Title Block Discovery": "  Discovery Results",
+    "Revision Plan": "  Revision Plan",
+    "Reports": "  Reports",
 }
 
 
@@ -445,15 +456,10 @@ class ModernMain(legacy.Main):
 
     @staticmethod
     def _nav_caption(title: str) -> str:
-        captions = {
-            "Setup": "  Setup",
-            "Pipeline": "  Migration Pipeline",
-            "Supporting Files": "  Supporting Files",
-            "Discovery": "  Discovery Results",
-            "Revision Plan": "  Revision Plan",
-            "Reports": "  Reports",
-        }
-        return captions.get(title, f"  {title}")
+        # Keys must match the real tab titles built in app.py::Main.__init__; the
+        # old map used pre-rename names ("Pipeline", "Supporting Files",
+        # "Discovery") and silently fell back to "  <full title>".
+        return NAV_CAPTIONS.get(title, f"  {title}")
 
     def _show_page(self, index: int) -> None:
         if not 0 <= index < self.page_stack.count():

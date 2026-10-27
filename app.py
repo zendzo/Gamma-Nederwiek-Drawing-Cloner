@@ -11,11 +11,11 @@ from revision.write_plan import RevisionWritePlanBuilder
 from revision.cleanup_plan import NoDonorRevisionCleanupPlanBuilder
 from revision.completion_plan import TitleBlockCompletionPlanBuilder
 from revision.controlled_writer import ControlledRevisionWriter
-from revision.stable_external_writer import StableExternalActionWriter
-from revision.reopen_validator import StableReopenValidator
+from revision.stable_external_writer import StableExternalActionWriter,StableWriterError
+from revision.reopen_validator import StableReopenValidator,ReopenValidationError
 from revision.responsive_validator import ResponsiveReopenValidatorWorker
-from revision.atomic_publish_dry_run import AtomicPublisherDryRun
-from revision.atomic_publisher import AtomicPublisher
+from revision.atomic_publish_dry_run import AtomicPublisherDryRun,AtomicPublishDryRunError
+from revision.atomic_publisher import AtomicPublisher,AtomicPublishError
 from revision.pdf_worker import PdfPublishWorker
 from revision.cleanup_writer import CorrectedHistoryCleanupWriter
 from runtime.production_workers import DiscoveryWorker, ProductionPlanWorker
@@ -32,7 +32,7 @@ class Main(QMainWindow):
   l.addLayout(f);self.maped=[]
   m=QGroupBox('Controlled replacement mapping');mf=QFormLayout(m)
   for label,attr,default in [('Project from','project_from','IJMUIDEN VER GAMMA'),('Project to','project_to','NEDERWIEK BETA'),('Drawing from','drawing_from','2013J310015'),('Drawing to','drawing_to','I301-J30019'),('Long ref from','long_from','OEPA230146'),('Long ref to','long_to','OEPA240101'),('Short ref from','short_from','230146'),('Short ref to','short_to','240101'),('Contractor doc-id from','contractor_doc_from','2GWG'),('Contractor doc-id to','contractor_doc_to','2GWN')]:e=QLineEdit(getattr(self.s,attr,default));self.maped.append((attr,e));mf.addRow(label,e)
-  l.addWidget(m);pg=QGroupBox('Migration pipeline');pv=QVBoxLayout(pg);self.stage_tbl=self.table(['Step','Stage','Status','Report']);self.stage_tbl.setEditTriggers(QAbstractItemView.NoEditTriggers);self.stage_tbl.setSelectionMode(QAbstractItemView.NoSelection);self.stage_tbl.setMaximumHeight(230);pv.addWidget(self.stage_tbl)
+  l.addWidget(m);pg=QGroupBox('Migration pipeline');pv=QVBoxLayout(pg);self.stage_tbl=self.table(['Step','Stage','Status','Report']);self.stage_tbl.setEditTriggers(QAbstractItemView.NoEditTriggers);self.stage_tbl.setSelectionMode(QAbstractItemView.SingleSelection);self.stage_tbl.setSelectionBehavior(QAbstractItemView.SelectRows);self.stage_tbl.setMaximumHeight(230);self.stage_tbl.cellDoubleClicked.connect(self.open_stage_report);pv.addWidget(self.stage_tbl)
   self.primary=QPushButton('Run: Scan source');self.primary.setMinimumHeight(38);self.primary.clicked.connect(self.run_next_stage);self.primary.setDefault(True);pv.addWidget(self.primary)
   prow=QHBoxLayout();self.cancelb=QPushButton('Cancel Safely');self.cancelb.setEnabled(False);self.cancelb.clicked.connect(self.cancel_unified_operation);self.workers=QSpinBox();self.workers.setRange(1,16);self.workers.setValue(max(1,min(16,int(getattr(self.s,'workers',4)))));self.workers.setToolTip('Concurrent Core Console processes for the writer, validator and PDF stages. 4-6 is a good starting point.');prow.addWidget(self.cancelb);prow.addStretch();prow.addWidget(QLabel('Parallel workers'));prow.addWidget(self.workers);pv.addLayout(prow)
   self.prog=QProgressBar();pv.addWidget(self.prog);self.status=QLabel('Ready. The button runs every remaining step up to the publish gate.');self.status.setWordWrap(True);pv.addWidget(self.status)
@@ -54,14 +54,14 @@ class Main(QMainWindow):
   """Return 'complete', 'incomplete' or 'missing' for a stage report."""
   path=self.stage_report_path(key)
   if not path or not path.is_file():return 'missing'
-  if key not in ('discovery','plan'):return 'complete'
   import json
   try:payload=json.loads(path.read_text(encoding='utf-8'))
   except (OSError,ValueError):return 'missing'
   if not isinstance(payload,dict):return 'missing'
   # A cancelled sweep still writes its report; without this flag the pipeline
-  # advanced on partial discovery/plan data. Reports written before 0.4C.7 have
-  # no flag and keep the old behaviour so upgrades do not re-run everything.
+  # advanced on partial data. Applies to every stage now: the PDF writer marks
+  # its report partial on cancel too. Reports written before 0.4C.7 have no flag
+  # and keep the old behaviour so upgrades do not re-run everything.
   if payload.get('complete') is False:return 'incomplete'
   return 'complete'
  def _stage_complete(self,key):
@@ -92,7 +92,9 @@ class Main(QMainWindow):
   self.refresh_primary()
  def refresh_primary(self):
   nxt=self.next_stage()
-  if not nxt:self.primary.setText('All stages complete - open Reports');return
+  # Nothing pending: the button is a shortcut to the evidence, not a dead end.
+  if not nxt:self.primary.setText('Open Reports');self.primary.setToolTip('All pipeline stages are complete. Opens the Reports tab.');return
+  self.primary.setToolTip('')
   key,label=nxt;root=Path(self.dst.text())/self.bundle.text()
   if key=='publish':
    try:count=len(AtomicPublisher.load_ready_transactions(root))
@@ -102,8 +104,11 @@ class Main(QMainWindow):
   else:self.primary.setText('Run migration to publish gate: '+label)
  def run_next_stage(self):
   nxt=self.next_stage()
-  if not nxt:QMessageBox.information(self,'Migration pipeline','All stages are complete. Double-click a report in the Reports tab to inspect it, or use Advanced to re-run one stage.');return
+  if not nxt:self.show_reports_tab();self.status.setText('All pipeline stages are complete. Reports are listed below.');return
   self._chain=nxt[0] in AUTO_STAGES;self.run_stage(nxt[0])
+ def show_reports_tab(self):
+  for index in range(self.centralWidget().count()):
+   if self.centralWidget().tabText(index)=='Reports':self.centralWidget().setCurrentIndex(index);self.refresh_reports();return
  def run_stage(self,key):
   self.save();handler={'scan':self.do_scan,'destination':self.build_destination,'clone':self.clone_supporting,'discovery':self.discover_title_blocks,'plan':self.build_revision_plan,'writer':self.run_controlled_writer,'validator':self.run_reopen_validator,'dryrun':self.run_atomic_publish_dry_run,'publish':self.run_atomic_publisher,'pdf':self.run_pdf_publisher}[key]
   self._running_stage=key;self.refresh_pipeline();started=handler()
@@ -124,7 +129,11 @@ class Main(QMainWindow):
   if next_key:
    QTimer.singleShot(30,lambda stage=next_key:self.run_stage(stage))
   else:
-   self._chain=False;self.refresh_pipeline();nxt=self.next_stage()
+   self._chain=False;self.refresh_pipeline()
+   # Read next_stage() only after refresh_pipeline() so the label is current;
+   # it used to be computed from rows rendered before this stage was marked DONE,
+   # which left the primary button one stage behind.
+   nxt=self.next_stage()
    if nxt:
     self.status.setText('Non-destructive stages complete. Review the dry-run report, then publish explicitly.');QMessageBox.information(self,'Ready to publish',f'All non-destructive stages are complete.\n\nNext action: {self.primary.text()}\n\nReview the dry-run report in the Reports tab before publishing.')
  def _tab_changed(self,index):
@@ -139,14 +148,28 @@ class Main(QMainWindow):
    for column,value in enumerate([path.name,stamp(stat.st_mtime).strftime('%Y-%m-%d %H:%M:%S'),f'{stat.st_size/1024:.1f}']):self.rtbl.setItem(row,column,QTableWidgetItem(value))
   self.status.setText(f'Reports: {len(files)} file(s) in {root}')
  def open_report(self,row,column):
-  import os
-  if 0<=row<len(self._report_paths):
-   try:os.startfile(str(self._report_paths[row]))
-   except Exception as error:QMessageBox.critical(self,'Open report failed',str(error))
+  if 0<=row<len(self._report_paths):self._open_path(self._report_paths[row])
+ def _open_path(self,path):
+  """Open a file/folder with the OS handler; never raises."""
+  import os,subprocess,sys
+  try:
+   if hasattr(os,'startfile'):os.startfile(str(path))
+   elif sys.platform=='darwin':subprocess.Popen(['open',str(path)])
+   else:subprocess.Popen(['xdg-open',str(path)])
+  except Exception as error:QMessageBox.critical(self,'Open failed',str(error))
+ def open_stage_report(self,row,column=None):
+  """Open the handoff report for the double-clicked pipeline row."""
+  if not 0<=row<len(PIPELINE):return
+  key,_=PIPELINE[row]
+  if key=='scan':self.show_reports_tab();return
+  path=self.stage_report_path(key);stale=Path(str(path)+'.stale') if path else None
+  if path and not path.is_file():path=stale if stale and stale.is_file() else None
+  if not path or not path.is_file():
+   QMessageBox.information(self,'Open stage report',f'No report yet for the {PIPELINE[row][1]} stage.\n\nIt is written when the stage completes.');return
+  self._open_path(path)
  def open_reports_folder(self):
-  import os
   root=self.reports_root()
-  if root.is_dir():os.startfile(str(root))
+  if root.is_dir():self._open_path(root)
   else:QMessageBox.information(self,'Reports','No reports folder yet. Run a pipeline step first.')
  def browse(self,e,folder):
   x=QWidget();q=QHBoxLayout(x);q.setContentsMargins(0,0,0,0);q.addWidget(e);b=QPushButton('Browse');b.clicked.connect(lambda:self.pick(e,folder));q.addWidget(b);return x
@@ -159,24 +182,30 @@ class Main(QMainWindow):
   for a,e in self.maped:setattr(self.s,a,e.text())
   self.s.save(CFG)
  def run_controlled_writer(self):
+  root=Path(self.dst.text())/self.bundle.text();report=root/'_GNI_REPORTS'/'stable_external_writer_report.json'
   try:
-   self.save();root=Path(self.dst.text())/self.bundle.text();plan=root/'_GNI_REPORTS'/'revision_pilot_write_plan.json'
+   self.save();plan=root/'_GNI_REPORTS'/'revision_pilot_write_plan.json'
    if not plan.is_file():QMessageBox.critical(self,'Stable Writer','Build Revision Plan first.');return False
    plans,rejected=StableExternalActionWriter.load_ready_plans(plan,return_rejected=True)
    if rejected:self._report_rejected('Stable Writer',rejected)
    self._start_bg('writer',{'plans':plans,'core':self.exe.text(),'lisp':BASE/'lisp'/'stable_external_writer.lsp','app':BASE,'bundle_root':root,'workers':int(self.workers.value())});return True
+  except StableWriterError as e:return self._gate_blocked('Stable Writer',report,e)
   except Exception as e:QMessageBox.critical(self,'Stable Writer failed',str(e));return False
  def run_reopen_validator(self):
+  root=Path(self.dst.text())/self.bundle.text();report=root/'_GNI_REPORTS'/'reopen_validation_report.json'
   try:
-   self.save();root=Path(self.dst.text())/self.bundle.text();pairs,rejected=StableReopenValidator.load_writer_results(root/'_GNI_REPORTS'/'stable_external_writer_report.json',return_rejected=True)
+   self.save();pairs,rejected=StableReopenValidator.load_writer_results(root/'_GNI_REPORTS'/'stable_external_writer_report.json',return_rejected=True)
    if rejected:self._report_rejected('Reopen Validator',rejected)
    self._start_bg('validator',{'pairs':pairs,'core':self.exe.text(),'lisp':BASE/'lisp'/'reopen_validator.lsp','app':BASE,'bundle_root':root,'workers':int(self.workers.value())});return True
+  except ReopenValidationError as e:return self._gate_blocked('Reopen Validator',report,e)
   except Exception as e:QMessageBox.critical(self,'Reopen Validator failed',str(e));return False
  def run_atomic_publish_dry_run(self):
+  root=Path(self.dst.text())/self.bundle.text();report=root/'_GNI_REPORTS'/'atomic_publish_dry_run_report.json'
   try:
-   self.save();root=Path(self.dst.text())/self.bundle.text();pairs,rejected=AtomicPublisherDryRun.load_validated_pairs(root,return_rejected=True)
+   self.save();pairs,rejected=AtomicPublisherDryRun.load_validated_pairs(root,return_rejected=True)
    if rejected:self._report_rejected('Atomic Dry Run',rejected)
    self._start_bg('dryrun',{'pairs':pairs,'app':BASE,'bundle_root':root,'workers':int(self.workers.value())});return True
+  except AtomicPublishDryRunError as e:return self._gate_blocked('Atomic Dry Run',report,e)
   except Exception as e:QMessageBox.critical(self,'Atomic Dry Run failed',str(e));return False
  def _report_rejected(self,stage,rejected):
   """Record plans the gate dropped so the batch can continue without them."""
@@ -186,13 +215,52 @@ class Main(QMainWindow):
   payload={'schema':'GNI-Gate-Rejected-0.4C.7','generated_at':__import__('datetime').datetime.now().astimezone().isoformat(),'stage':stage,'count':len(rejected),'rejected':rejected}
   path.write_text(__import__('json').dumps(payload,indent=2,ensure_ascii=False),encoding='utf-8')
   self.status.setText(f'{stage}: {len(rejected)} drawing(s) skipped by the gate - see gate_rejected.json')
- def run_atomic_publisher(self):
+ def _quarantine_report(self,report_path):
+  """Rename a stale handoff report so the pipeline cannot advance onto it.
+
+  When a gate rejects every item the stage did not run, but its previous report
+  is still on disk and still looks current. Leaving it there meant the next
+  stage ran against stale data and the failing stage never reached a terminal
+  state, so every resume re-raised the same error.
+  """
   try:
-   self.save();root=Path(self.dst.text())/self.bundle.text();packages,rejected=AtomicPublisher.load_ready_transactions(root,return_rejected=True)
+   stale=Path(str(report_path)+'.stale');report_path.replace(stale);return stale
+  except OSError:
+   report_path.unlink(missing_ok=True);return None
+ def _gate_blocked(self,stage,report_path,error,rejected=None):
+  """Report a gate that accepted nothing, quarantine the stale report, return False."""
+  message=str(error);rejected=list(rejected or [])
+  _,_,detail=message.partition(':')
+  detail=detail.strip()
+  # Detail is "IDENTITY=ERR1,ERR2; IDENTITY2=...". A leading "IDENTITY=..." form
+  # is used by the writer, whose code prefix is followed by a space.
+  # Entries without '=' carry no errors but are still reported.
+  if detail and not rejected:
+   for chunk in detail.split(';'):
+    chunk=chunk.strip()
+    if not chunk:continue
+    identity,_,errors=chunk.partition('=')
+    rejected.append({'identity':identity.strip() or '?','errors':[e.strip() for e in errors.split(',') if e.strip()]})
+  if rejected:self._report_rejected(stage,rejected)
+  self._quarantine_report(report_path) if report_path else None
+  self.refresh_pipeline()
+  if not rejected:self.status.setText(f'{stage}: nothing to process - {message}');return False
+  summary=f'{len(rejected)} drawing(s) rejected, 0 accepted.'
+  self.status.setText(f'{stage}: {summary} Nothing was written.')
+  # `self` is a QMainWindow, so QMessageBox.warning is the QWidget overload
+  # (parent, title, text) - unlike the static convenience call.
+  box=QMessageBox(QMessageBox.Warning,f'{stage} - nothing to process',f'{summary}\n\n'+'\n'.join(f'{item.get("identity","?")}: {", ".join(item.get("errors",[]))}' for item in rejected[:10])+'\n\nThe previous handoff report was moved aside so the pipeline cannot advance on stale data. Fix the listed drawings, then run this stage again.',QMessageBox.Ok,self)
+  box.setObjectName('gateBlockedDialog');box.show();box.raise_()
+  return False
+ def run_atomic_publisher(self):
+  root=Path(self.dst.text())/self.bundle.text();report=root/'_GNI_REPORTS'/'atomic_publish_report.json'
+  try:
+   self.save();packages,rejected=AtomicPublisher.load_ready_transactions(root,return_rejected=True)
    if rejected:self._report_rejected('Atomic Publisher',rejected)
    overwrites=sum(f.get('destination_exists',False) for p in packages for f in p['dry_run'].get('files',[]));answer=QMessageBox.question(self,'Confirm Atomic Publishing',f'Publish {len(packages)} validated pair(s)?\nSkipped by gate: {len(rejected)}\nExisting files: {overwrites}\nBundle: {root}',QMessageBox.Yes|QMessageBox.No,QMessageBox.No)
    if answer!=QMessageBox.Yes:return False
    self._start_bg('publish',{'packages':packages,'app':BASE,'bundle_root':root,'workers':int(self.workers.value())});return True
+  except AtomicPublishError as e:return self._gate_blocked('Atomic Publisher',report,e)
   except Exception as e:QMessageBox.critical(self,'Atomic Publisher failed',str(e));return False
  def run_pdf_publisher(self):
   try:
@@ -205,7 +273,31 @@ class Main(QMainWindow):
  def _on_pdf_progress(self,current,total,identity,stage):
   self.prog.setRange(0,total);self.prog.setValue(max(0,current-1));self.status.setText(f'PDF Publisher ({int(self.workers.value())} workers): {current} of {total} | {identity} | {stage}')
  def _on_pdf_complete(self,results,report):
-  self._running_stage=None;self._set_pipeline_busy(False);self.prog.setRange(0,100);self.prog.setValue(100);ok=sum(r.status=='PDF_PAIR_PUBLISHED' for r in results);failed=len(results)-ok;unchanged=sum(o.status=='PDF_UNCHANGED' for r in results for o in r.outputs);details='\n'.join(f'{r.identity}: {r.status} '+('; '.join(r.errors) if r.errors else '') for r in results);self.status.setText(f'PDF Publisher: {ok} pairs published ({unchanged} unchanged), {failed} failed');self.refresh_pipeline();QMessageBox.information(self,'PDF Publishing complete',self.status.text()+'\n\n'+details+'\n\nReport:\n'+report)
+  self._running_stage=None;self._set_pipeline_busy(False);self.prog.setRange(0,100);self.prog.setValue(100);ok=sum(r.status=='PDF_PAIR_PUBLISHED' for r in results);failed=len(results)-ok;unchanged=sum(o.status=='PDF_UNCHANGED' for r in results for o in r.outputs);failed_pairs=[r for r in results if r.status!='PDF_PAIR_PUBLISHED'];self.status.setText(f'PDF Publisher: {ok} pairs published ({unchanged} unchanged), {failed} failed');self.refresh_pipeline()
+  # A long batch can have many failures; show the headline in the dialog and keep
+  # the complete list on disk so nothing has to be copied out of a message box.
+  failure_file=self._write_failures('PDF Publisher',failed_pairs,report)
+  details='\n'.join(f'{r.identity}: {r.status} '+('; '.join(r.errors) if r.errors else '') for r in results)
+  if failed:
+   headline='\n'.join(f'{r.identity}: {r.status}' for r in failed_pairs[:5])
+   if len(failed_pairs)>5:headline+=f'\n... {len(failed_pairs)-5} more (see {failure_file.name})'
+   self.status.setText(self.status.text()+f' | first failures: {headline.replace(chr(10),"; ")}')
+   QMessageBox.warning(self,'PDF Publishing finished with failures',f'{self.status.text()}\n\n{headline}\n\nFull report:\n{report}\n\nFailure list:\n{failure_file}')
+  else:
+   QMessageBox.information(self,'PDF Publishing complete',self.status.text()+'\n\n'+details+'\n\nReport:\n'+report)
+ def _write_failures(self,stage,failed_pairs,report):
+  """Persist the full failure list next to the reports; never raises."""
+  import json,datetime
+  root=self.reports_root()
+  try:
+   root.mkdir(parents=True,exist_ok=True)
+   path=root/'failures.json'
+   payload={'schema':'GNI-Failures-0.4C.9','generated_at':datetime.datetime.now().astimezone().isoformat(),'stage':stage,'report':str(report),'count':len(failed_pairs),'failures':[{'identity':getattr(r,'identity',''),'status':getattr(r,'status',''),'errors':list(getattr(r,'errors',[]) or [])} for r in failed_pairs]}
+   path.write_text(json.dumps(payload,indent=2,ensure_ascii=False),encoding='utf-8')
+   return path
+  except OSError as error:
+   self.status.setText(self.status.text()+f' | failure list could not be written: {error}')
+   return root/'failures.json'
  def _on_pdf_failed(self,message):
   self._running_stage=None;self._chain=False;self._set_pipeline_busy(False);self.prog.setRange(0,100);self.prog.setValue(0);self.refresh_pipeline();QMessageBox.critical(self,'PDF Publisher failed',message)
  def status_update_safe(self,message):
@@ -226,6 +318,11 @@ class Main(QMainWindow):
    if not worker.wait(5000):QMessageBox.warning(self,'Background operation',f'{worker.__class__.__name__} did not stop in 5 seconds and will be abandoned.')
   if not self.bg.shutdown(5000):QMessageBox.warning(self,'Background operation','The background operation did not stop in 5 seconds and will be abandoned.')
   child_registry.terminate_all()
+  # The app is no longer exiting (an earlier close may have been cancelled, or
+  # Close() was only called on a window that is still alive). Without this the
+  # registry refused every child spawned by a later run_console and returned
+  # returncode -15 with empty output.
+  child_registry.cancel_shutdown()
   event.accept()
  def _set_pipeline_busy(self,busy):
   self._busy=busy;self.primary.setEnabled(not busy);self.workers.setEnabled(not busy);self.cloneb.setEnabled(not busy);self._sync_advanced_buttons(self.adv.isChecked());self.cancelb.setEnabled(busy)
@@ -255,9 +352,12 @@ class Main(QMainWindow):
   self.status.setText(message);self.refresh_pipeline()
   if cancelled:self._chain=False
   if not self._chain:QMessageBox.information(self,'Background operation complete',message+('\n\nReport:\n'+report if report else ''))
-  elif not ok:
+  elif ok:
+   # Mid-cascade success needs no modal: the status line and progress bar carry
+   # it. One summary dialog is shown when the cascade reaches the publish gate.
+   self.status.setText(message+' | continuing...');self._advance_pipeline(operation)
+  else:
    self._chain=False;self.refresh_pipeline();QMessageBox.warning(self,'Pipeline stopped',message+'\n\nFix the reported issue, then run the next step again. Completed stages are skipped automatically.')
-  else:self._advance_pipeline(operation)
  def _bg_failed(self,operation,message):
   self._running_stage=None;self._chain=False;self._set_pipeline_busy(False);self.prog.setRange(0,100);self.prog.setValue(0);self.refresh_pipeline();QMessageBox.critical(self,operation+' failed',message)
  def build_revision_plan(self):
@@ -336,9 +436,8 @@ class Main(QMainWindow):
  def retry_supporting(self):
   self.clone_supporting(only_failed=True)
  def open_supporting_destination(self):
-  import os
   root=Path(self.dst.text())/self.bundle.text();target=root/'4. PART LIST'
-  if target.exists():os.startfile(str(target))
+  if target.exists():self._open_path(target)
  def build_destination(self):
   try:self.save();self._start_bg('destination',{'source':self.src.text(),'destination':self.dst.text(),'bundle':self.bundle.text(),'app':BASE});return True
   except Exception as e:QMessageBox.critical(self,'Destination build failed',str(e));return False

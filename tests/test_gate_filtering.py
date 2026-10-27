@@ -47,7 +47,9 @@ class WriterGateTests(unittest.TestCase):
         ready, rejected = StableExternalActionWriter.load_ready_plans(self.plan, return_rejected=True)
         self.assertEqual([item["identity"] for item in ready], ["ID-0", "ID-2"])
         self.assertEqual([item["identity"] for item in rejected], ["ID-1"])
-        self.assertIn("PLAN_NOT_READY", rejected[0]["errors"])
+        # P3: the reason names the status and omits defects a BLOCKED plan
+        # cannot satisfy anyway (it has no actions by design).
+        self.assertEqual(rejected[0]["errors"], ["PLAN_NOT_READY:BLOCKED"])
 
     def test_all_blocked_still_raises_with_details(self):
         self._write_plans("BLOCKED", "BLOCKED")

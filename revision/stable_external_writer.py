@@ -163,8 +163,14 @@ class StableExternalActionWriter:
         for plan in payload.get("plans", []):
             identity = plan.get("identity", "")
             errors = []
-            if not str(plan.get("status", "")).startswith("READY"):
-                errors.append("PLAN_NOT_READY")
+            status = str(plan.get("status", ""))
+            if not status.startswith("READY"):
+                # A BLOCKED plan has no usable actions *by design*, so listing
+                # NO_ACTIONS for it only buried the real reason. Report the
+                # status and stop collecting secondary defects.
+                errors.append("PLAN_NOT_READY:" + (status or "UNKNOWN"))
+                rejected.append({"identity": identity, "errors": errors})
+                continue
             primary = Path(str(plan.get("primary_geometry", "")))
             if not primary.is_file():
                 errors.append("PRIMARY_GEOMETRY_NOT_FOUND")
