@@ -11,6 +11,7 @@ Windows-only PySide6 desktop app that migrates Gamma AutoCAD drawings into the N
   `.\.venv\Scripts\python.exe -m compileall -q app.py app_modern.py models.py scanner config autocad destination supporting titleblock revision runtime tests`
 - Tests (no AutoCAD required):
   `.\.venv\Scripts\python.exe -m unittest discover -t . -s tests -v`
+- `TRIGGER_REAL_ACAD.bat check` is the Windows preflight: it verifies `.venv`, `accoreconsole.exe`, both reference PNGs and the live LISP files, then runs the offline suite and writes `logs/real_acad_<stamp>.txt`. Run it before any `TRIGGER_REAL_ACAD.bat full` session. Everything else in this repo has only been proven on Linux.
 - Real verification is a manual GUI run. It requires a valid `accoreconsole.exe` path in `config/settings.json` and both PNGs in `resources/reference_images/`, otherwise pipeline stages abort with `*_NOT_FOUND` / missing-raster errors.
 
 ## Wiring
