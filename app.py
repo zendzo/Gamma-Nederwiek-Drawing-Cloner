@@ -176,7 +176,7 @@ class Main(QMainWindow):
   try:
    self.save();root=Path(self.dst.text())/self.bundle.text();pairs,rejected=AtomicPublisherDryRun.load_validated_pairs(root,return_rejected=True)
    if rejected:self._report_rejected('Atomic Dry Run',rejected)
-   self._start_bg('dryrun',{'pairs':pairs,'app':BASE,'bundle_root':root});return True
+   self._start_bg('dryrun',{'pairs':pairs,'app':BASE,'bundle_root':root,'workers':int(self.workers.value())});return True
   except Exception as e:QMessageBox.critical(self,'Atomic Dry Run failed',str(e));return False
  def _report_rejected(self,stage,rejected):
   """Record plans the gate dropped so the batch can continue without them."""
@@ -188,9 +188,11 @@ class Main(QMainWindow):
   self.status.setText(f'{stage}: {len(rejected)} drawing(s) skipped by the gate - see gate_rejected.json')
  def run_atomic_publisher(self):
   try:
-   self.save();root=Path(self.dst.text())/self.bundle.text();packages=AtomicPublisher.load_ready_transactions(root);overwrites=sum(f.get('destination_exists',False) for p in packages for f in p['dry_run'].get('files',[]));answer=QMessageBox.question(self,'Confirm Atomic Publishing',f'Publish {len(packages)} validated pair(s)?\nExisting files: {overwrites}\nBundle: {root}',QMessageBox.Yes|QMessageBox.No,QMessageBox.No)
+   self.save();root=Path(self.dst.text())/self.bundle.text();packages,rejected=AtomicPublisher.load_ready_transactions(root,return_rejected=True)
+   if rejected:self._report_rejected('Atomic Publisher',rejected)
+   overwrites=sum(f.get('destination_exists',False) for p in packages for f in p['dry_run'].get('files',[]));answer=QMessageBox.question(self,'Confirm Atomic Publishing',f'Publish {len(packages)} validated pair(s)?\nSkipped by gate: {len(rejected)}\nExisting files: {overwrites}\nBundle: {root}',QMessageBox.Yes|QMessageBox.No,QMessageBox.No)
    if answer!=QMessageBox.Yes:return False
-   self._start_bg('publish',{'packages':packages,'app':BASE,'bundle_root':root});return True
+   self._start_bg('publish',{'packages':packages,'app':BASE,'bundle_root':root,'workers':int(self.workers.value())});return True
   except Exception as e:QMessageBox.critical(self,'Atomic Publisher failed',str(e));return False
  def run_pdf_publisher(self):
   try:

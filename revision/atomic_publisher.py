@@ -3,13 +3,15 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-import hashlib
 import json
 import os
 import shutil
 import tempfile
 import uuid
 from typing import Dict, List
+
+from runtime.hashing import sha256_file
+from runtime.parallel import run_pool
 
 PUBLISHER_VERSION = "0.4C.2B-atomic-publisher-commit"
 
@@ -87,13 +89,8 @@ class AtomicPublisher:
         for path in (self.reports_root, self.staging_root, self.backup_root):
             path.mkdir(parents=True, exist_ok=True)
 
-    @staticmethod
-    def _sha256(path):
-        digest = hashlib.sha256()
-        with Path(path).open("rb") as stream:
-            for block in iter(lambda: stream.read(4 * 1024 * 1024), b""):
-                digest.update(block)
-        return digest.hexdigest()
+    # Shared hasher: see runtime/hashing.py.
+    _sha256 = staticmethod(sha256_file)
 
     @staticmethod
     def _inside(path, parent):
@@ -141,7 +138,13 @@ class AtomicPublisher:
         return (destination.with_suffix(".dwl"), destination.with_suffix(".dwl2"))
 
     @classmethod
-    def load_ready_transactions(cls, bundle_root):
+    def load_ready_transactions(cls, bundle_root, return_rejected=False):
+        """Return publishable packages, dropping (not aborting on) rejected ones.
+
+        Matches the writer/validator/dry-run gates: one pair that failed its dry
+        run no longer blocks publishing every other pair. A rejected package is
+        never published — it is only left out and reported.
+        """
         reports = Path(bundle_root).resolve() / "_GNI_REPORTS"
         dry_path = reports / "atomic_publish_dry_run_report.json"
         validation_path = reports / "reopen_validation_report.json"
@@ -174,13 +177,18 @@ class AtomicPublisher:
             if not written or written.get("status") != "LOCAL_PAIR_WRITTEN_NOT_VALIDATED":
                 errors.append("WRITER_NOT_READY")
             if errors:
-                rejected.append(identity + "=" + ",".join(errors))
+                rejected.append({"identity": identity, "errors": errors})
                 continue
             accepted.append({"dry_run": item, "validation": valid, "writer": written})
-        if rejected:
-            raise AtomicPublishError("PUBLISH_GATE_REJECTED:" + ";".join(rejected))
         if not accepted:
-            raise AtomicPublishError("NO_READY_TRANSACTIONS")
+            detail = ";".join(
+                entry["identity"] + "=" + ",".join(entry["errors"]) for entry in rejected
+            )
+            raise AtomicPublishError(
+                "PUBLISH_GATE_REJECTED:" + detail if rejected else "NO_READY_TRANSACTIONS"
+            )
+        if return_rejected:
+            return accepted, rejected
         return accepted
 
     def _journal_payload(self, transaction, event):
@@ -338,8 +346,12 @@ class AtomicPublisher:
     def _rollback(self, transaction):
         errors = []
         for asset in reversed(transaction.assets):
+            # Drop the in-destination temporary whether or not it was committed:
+            # after a successful os.replace the temporary is gone, but a failed
+            # commit leaves a *.gni-publishing-* file next to the real drawing.
+            if asset.temporary_path:
+                Path(asset.temporary_path).unlink(missing_ok=True)
             if not asset.committed:
-                Path(asset.temporary_path).unlink(missing_ok=True) if asset.temporary_path else None
                 continue
             try:
                 destination = Path(asset.destination)
@@ -352,8 +364,9 @@ class AtomicPublisher:
             except Exception as error:
                 errors.append("ASSET:" + asset.name + ":" + repr(error))
         for item in reversed(transaction.files):
+            if item.temporary_path:
+                Path(item.temporary_path).unlink(missing_ok=True)
             if not item.committed:
-                Path(item.temporary_path).unlink(missing_ok=True) if item.temporary_path else None
                 continue
             try:
                 destination = Path(item.destination)
@@ -429,8 +442,17 @@ class AtomicPublisher:
             self._journal(transaction, "precommit_failed")
         return transaction
 
-    def publish_many(self, packages):
-        return [self.publish_package(package) for package in packages]
+    def publish_many(self, packages, workers=1, on_result=None, should_cancel=None):
+        """Publish packages, optionally in parallel, returning them in input order.
+
+        Same contract as ``inspect_many``: ``on_result`` fires in completion order
+        and the returned list is re-sorted. Each package is an independent
+        transaction (own staging, backup and journal), so parallel commits do not
+        interleave.
+        """
+        return run_pool(
+            self.publish_package, packages, workers, on_result, should_cancel
+        )
 
     @staticmethod
     def write_report(bundle_root, transactions):
