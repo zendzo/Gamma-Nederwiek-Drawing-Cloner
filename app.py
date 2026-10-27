@@ -2,22 +2,13 @@ import sys
 from pathlib import Path
 from PySide6.QtCore import Qt,QTimer
 from PySide6.QtWidgets import *
-from scanner.universal import Scanner
 from config.settings import Settings
 from destination.builder import DestinationBuilder
-from supporting.clone_engine import SupportingCloneEngine
-from titleblock.discovery import TitleBlockDiscoveryEngine
-from revision.write_plan import RevisionWritePlanBuilder
-from revision.cleanup_plan import NoDonorRevisionCleanupPlanBuilder
-from revision.completion_plan import TitleBlockCompletionPlanBuilder
-from revision.controlled_writer import ControlledRevisionWriter
 from revision.stable_external_writer import StableExternalActionWriter,StableWriterError
 from revision.reopen_validator import StableReopenValidator,ReopenValidationError
-from revision.responsive_validator import ResponsiveReopenValidatorWorker
 from revision.atomic_publish_dry_run import AtomicPublisherDryRun,AtomicPublishDryRunError
 from revision.atomic_publisher import AtomicPublisher,AtomicPublishError
 from revision.pdf_worker import PdfPublishWorker
-from revision.cleanup_writer import CorrectedHistoryCleanupWriter
 from runtime.production_workers import DiscoveryWorker, ProductionPlanWorker
 from runtime.background_controller import BackgroundOperationController
 BASE=Path(__file__).resolve().parent;CFG=BASE/'config'/'settings.json'

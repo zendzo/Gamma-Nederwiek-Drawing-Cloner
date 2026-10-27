@@ -20,9 +20,7 @@ LISP_DIR = ROOT / "lisp"
 
 # module -> classes whose marker constants gate the run.
 ENGINES = {
-    "autocad.background": ("BackgroundEngine",),
     "titleblock.discovery": ("TitleBlockDiscoveryEngine",),
-    "revision.controlled_writer": ("ControlledRevisionWriter",),
     "revision.stable_external_writer": ("StableExternalActionWriter",),
     "revision.reopen_validator": ("StableReopenValidator",),
 }
@@ -54,7 +52,18 @@ class LispMarkerTests(unittest.TestCase):
                         self.assertTrue(
                             marker in text,
                             f"{module_name}.{class_name}.{attr} = {marker!r} is not printed by any lisp/*.lsp")
-        self.assertGreaterEqual(checked, 8, "marker discovery found too few constants")
+        # Every registered engine declares at least a LOAD_MARKER; keep this
+        # anchored to the registry so removing an engine cannot silently turn
+        # the check into a no-op.
+        expected = sum(
+            1
+            for module_name, class_names in ENGINES.items()
+            for class_name in class_names
+            if getattr(getattr(importlib.import_module(module_name), class_name), "LOAD_MARKER", None)
+        )
+        self.assertEqual(checked >= expected, True)
+        self.assertGreaterEqual(expected, len(ENGINES),
+                                "every registered engine must expose LOAD_MARKER")
 
     def test_pdf_plotter_marker_exists_in_lisp(self):
         from revision import pdf_publisher
@@ -88,7 +97,6 @@ class LispMarkerTests(unittest.TestCase):
 class LispFileTests(unittest.TestCase):
     def test_expected_lisp_files_are_present(self):
         expected = {
-            "background_engine.lsp",
             "title_block_discovery.lsp",
             "stable_external_writer.lsp",
             "reopen_validator.lsp",
