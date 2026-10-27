@@ -22,11 +22,11 @@ from runtime.production_workers import DiscoveryWorker, ProductionPlanWorker
 from runtime.background_controller import BackgroundOperationController
 BASE=Path(__file__).resolve().parent;CFG=BASE/'config'/'settings.json'
 PIPELINE=(('scan','Scan source'),('destination','Build destination'),('clone','Clone supporting files'),('discovery','Discover title blocks'),('plan','Build revision plan'),('writer','Stable external writer'),('validator','Reopen validator'),('dryrun','Atomic publish dry run'),('publish','Atomic publisher'),('pdf','Publish PDFs'))
-STAGE_REPORTS={'destination':'destination_manifest.json','clone':'supporting_file_clone_report.json','discovery':'title_block_discovery_fields.csv','plan':'revision_pilot_write_plan.json','writer':'stable_external_writer_report.json','validator':'reopen_validation_report.json','dryrun':'atomic_publish_dry_run_report.json','publish':'atomic_publish_report.json','pdf':'pdf_publish_report.json'}
+STAGE_REPORTS={'destination':'destination_manifest.json','clone':'supporting_file_clone_report.json','discovery':'title_block_discovery_report.json','plan':'revision_pilot_write_plan.json','writer':'stable_external_writer_report.json','validator':'reopen_validation_report.json','dryrun':'atomic_publish_dry_run_report.json','publish':'atomic_publish_report.json','pdf':'pdf_publish_report.json'}
 AUTO_STAGES=('scan','destination','clone','discovery','plan','writer','validator','dryrun')
 class Main(QMainWindow):
  def __init__(self):
-  super().__init__();self.bg=BackgroundOperationController(self);self.bg.progress.connect(self._bg_progress);self.bg.status.connect(self.status_update_safe);self.bg.finished.connect(self._bg_finished);self.bg.failed.connect(self._bg_failed);self.resize(1500,850);self.setWindowTitle('Gamma to Nederwiek - Revision Migration (0.4C.6)');self.s=Settings.load(CFG);self.files=[];self.groups=[];self.support=[];self._chain=False;self._skipped=set();self._running_stage=None;self._busy=False
+  super().__init__();self.bg=BackgroundOperationController(self);self.bg.progress.connect(self._bg_progress);self.bg.status.connect(self.status_update_safe);self.bg.finished.connect(self._bg_finished);self.bg.failed.connect(self._bg_failed);self.resize(1500,850);self.setWindowTitle('Gamma to Nederwiek - Revision Migration (0.4C.6 - publish gate loop fix)');self.s=Settings.load(CFG);self.files=[];self.groups=[];self.support=[];self._chain=False;self._skipped=set();self._running_stage=None;self._busy=False
   tabs=QTabWidget();self.setCentralWidget(tabs);w=QWidget();tabs.addTab(w,'Setup');l=QVBoxLayout(w);f=QFormLayout();self.src=QLineEdit(self.s.source_folder);self.dst=QLineEdit(self.s.destination_root);self.bundle=QLineEdit(self.s.destination_bundle_name);self.exe=QLineEdit(self.s.core_console)
   for label,e,folder in [('Source',self.src,True),('Destination root',self.dst,True),('Bundle name',self.bundle,None),('accoreconsole.exe',self.exe,False)]:f.addRow(label,self.browse(e,folder) if folder is not None else e)
   l.addLayout(f);self.maped=[]
@@ -50,28 +50,30 @@ class Main(QMainWindow):
   for button in self.stage_buttons.values():button.setEnabled(bool(on) and not self._busy)
  def stage_report_path(self,key):
   name=STAGE_REPORTS.get(key);return self.reports_root()/name if name else None
+ def _stage_complete(self,key):
+  if key=='scan':return bool(self.files)
+  if key in self._skipped:return True
+  path=self.stage_report_path(key)
+  if not path or not path.is_file():return False
+  if key=='discovery':
+   root=self.reports_root()
+   return (root/'title_block_discovery_report.json').is_file() and (root/'title_block_discovery_fields.csv').is_file()
+  return True
  def next_stage(self):
   if not self.files:return ('scan','Scan source')
-  last=0.0;stale=False
   for key,label in PIPELINE:
    if key=='scan' or key in self._skipped:continue
-   path=self.stage_report_path(key)
-   if not path or not path.is_file():return (key,label)
-   mtime=path.stat().st_mtime
-   if stale or mtime<last:return (key,label)
-   last=max(last,mtime)
+   if not self._stage_complete(key):return (key,label)
   return None
  def refresh_pipeline(self):
   nxt=self.next_stage();nxt_key=nxt[0] if nxt else ''
-  self.stage_tbl.setRowCount(len(PIPELINE));last=0.0;stale=False
+  self.stage_tbl.setRowCount(len(PIPELINE))
   for row,(key,label) in enumerate(PIPELINE):
    path=self.stage_report_path(key)
    if key in self._skipped:state='SKIPPED'
    elif key==self._running_stage:state='RUNNING'
-   elif key=='scan':state='DONE' if self.files else 'PENDING'
-   elif not path or not path.is_file():state='PENDING'
-   elif stale or path.stat().st_mtime<last:state='STALE';stale=True
-   else:state='DONE';last=max(last,path.stat().st_mtime)
+   elif self._stage_complete(key):state='DONE'
+   else:state='PENDING'
    for column,value in enumerate([str(row+1),label,state,path.name if path else '(this session)']):self.stage_tbl.setItem(row,column,QTableWidgetItem(value))
    if key==nxt_key:self.stage_tbl.selectRow(row)
   self.refresh_primary()
@@ -102,12 +104,14 @@ class Main(QMainWindow):
   self._running_stage=None;self.refresh_pipeline()
   if not self._chain:return
   if completed not in AUTO_STAGES:self._chain=False;return
-  nxt=self.next_stage()
-  if nxt and nxt[0]==completed:
-   self._chain=False;self.refresh_pipeline();QMessageBox.warning(self,'Pipeline stalled',f'{completed} did not produce a newer report, so it would run again.\n\nCheck the report timestamps in the Reports tab and re-run the stage from Advanced.');return
-  if nxt and nxt[0] in AUTO_STAGES:QTimer.singleShot(30,self.run_next_stage)
+  if not self._stage_complete(completed):
+   self._chain=False;self.refresh_pipeline();QMessageBox.warning(self,'Pipeline stalled',f'{completed} finished, but its required report was not found.\n\nAutomatic execution was stopped to prevent an infinite loop. Check the Reports tab, then re-run this stage from Advanced.');return
+  completed_index=AUTO_STAGES.index(completed)
+  next_key=AUTO_STAGES[completed_index+1] if completed_index+1<len(AUTO_STAGES) else None
+  if next_key:
+   QTimer.singleShot(30,lambda stage=next_key:self.run_stage(stage))
   else:
-   self._chain=False;self.refresh_pipeline()
+   self._chain=False;self.refresh_pipeline();nxt=self.next_stage()
    if nxt:
     self.status.setText('Non-destructive stages complete. Review the dry-run report, then publish explicitly.');QMessageBox.information(self,'Ready to publish',f'All non-destructive stages are complete.\n\nNext action: {self.primary.text()}\n\nReview the dry-run report in the Reports tab before publishing.')
  def _tab_changed(self,index):
