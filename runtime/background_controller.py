@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
-import hashlib
 import json
 import os
 import threading
@@ -11,6 +10,8 @@ import time
 import traceback
 
 from PySide6.QtCore import QObject, QThread, QTimer, Signal
+
+from runtime.hashing import hash_text, sha256_file
 
 
 class PipelineWorker(QThread):
@@ -33,12 +34,8 @@ class PipelineWorker(QThread):
     def stop_event(self):
         return self._stop
 
-    @staticmethod
-    def _sha(path):
-        h = hashlib.sha256()
-        with Path(path).open('rb') as f:
-            for block in iter(lambda: f.read(4 * 1024 * 1024), b''): h.update(block)
-        return h.hexdigest()
+    # Shared hasher: see runtime/hashing.py.
+    _sha = staticmethod(sha256_file)
 
     def run(self):
         try:
@@ -107,7 +104,7 @@ class PipelineWorker(QThread):
         ]
         actions.sort(key=lambda item: (item["output_revision"], item["handle"], item["target_field"]))
         payload = json.dumps(actions, sort_keys=True, default=str, ensure_ascii=False)
-        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        return hash_text(payload)
 
     def _writer_reusable(self, record, plan, source_sha=None, plan_sha=None):
         if not record:return False
@@ -212,18 +209,23 @@ class PipelineWorker(QThread):
 
     def _run_dryrun(self):
         from revision.atomic_publish_dry_run import AtomicPublisherDryRun
-        pairs=self.payload['pairs'];publisher=AtomicPublisherDryRun(self.payload['bundle_root'],self.payload['app']);results=[];total=len(pairs)
-        for i,pair in enumerate(pairs,1):
-            if self.cancel_requested:break
-            self.progress.emit(i,total,pair['identity'],'PAIR','Checking hashes, locks, paths and assets');results.append(publisher.inspect_pair(pair))
+        pairs=self.payload['pairs'];publisher=AtomicPublisherDryRun(self.payload['bundle_root'],self.payload['app']);total=len(pairs)
+        workers=max(1,int(self.payload.get('workers') or 1));count=[0]
+        def on_result(result):
+            # Completion order, not plan order: report the pair that just finished.
+            count[0]+=1;self.progress.emit(count[0],total,result.identity,'PAIR','Checked hashes, locks, paths and assets')
+        results=publisher.inspect_many(pairs,workers=workers,on_result=on_result,should_cancel=lambda:self.cancel_requested)
         report=publisher.write_report(self.payload['bundle_root'],results);return results,report,self.cancel_requested and len(results)<total,0
 
     def _run_publish(self):
         from revision.atomic_publisher import AtomicPublisher
-        packages=self.payload['packages'];publisher=AtomicPublisher(self.payload['bundle_root'],self.payload['app']);results=[];total=len(packages)
-        for i,package in enumerate(packages,1):
-            if self.cancel_requested:break
-            identity=package['dry_run']['identity'];self.progress.emit(i,total,identity,'TRANSACTION','Staging, backup, commit and verification');results.append(publisher.publish_package(package))
+        packages=self.payload['packages'];publisher=AtomicPublisher(self.payload['bundle_root'],self.payload['app']);total=len(packages)
+        workers=max(1,int(self.payload.get('workers') or 1));count=[0]
+        def on_result(result):
+            count[0]+=1;self.progress.emit(count[0],total,result.identity,'TRANSACTION','Published or rolled back')
+        # Publishing is destructive, so a cancel stops between transactions only;
+        # an in-flight transaction always completes or rolls back as a unit.
+        results=publisher.publish_many(packages,workers=workers,on_result=on_result,should_cancel=lambda:self.cancel_requested)
         report=publisher.write_report(self.payload['bundle_root'],results);return results,report,self.cancel_requested and len(results)<total,0
 
 

@@ -5,6 +5,7 @@ from pathlib import Path
 import csv, json, os, re, shutil, subprocess, tempfile, time, uuid
 from typing import Iterable, List
 
+from runtime.console_text import decode_console
 from runtime.process_tracking import run_console
 
 DISCOVERY_VERSION='0.4A.2-full-replacement'
@@ -44,15 +45,8 @@ class TitleBlockDiscoveryEngine:
         if not self.lisp_source.is_file():raise FileNotFoundError(f'Discovery LSP not found: {self.lisp_source}')
         temp=Path(os.environ.get('TEMP') or tempfile.gettempdir()).resolve();self.job_root=temp/'GNI'/'titleblock_discovery';self.runtime_root=temp/'GNI'/'trusted_runtime';self.job_root.mkdir(parents=True,exist_ok=True);self.runtime_root.mkdir(parents=True,exist_ok=True)
         self.runtime_lisp=self.runtime_root/'title_block_discovery.lsp';self._copy(self.lisp_source,self.runtime_lisp)
-    @staticmethod
-    def _decode(v):
-        if v is None:return ''
-        if isinstance(v,str):return v
-        if v.startswith(b'\xff\xfe') or (len(v)>4 and v[1:2]==b'\x00'):return v.decode('utf-16',errors='replace')
-        for enc in ('utf-8','cp1252'):
-            try:return v.decode(enc)
-            except UnicodeDecodeError:pass
-        return v.decode('utf-8',errors='replace')
+    # Shared decoder: see runtime/console_text.py (UTF-16LE without BOM).
+    _decode=staticmethod(decode_console)
     @staticmethod
     def _copy(src,dst):
         src=Path(src);dst=Path(dst);dst.parent.mkdir(parents=True,exist_ok=True);tmp=dst.with_suffix(dst.suffix+'.copying')

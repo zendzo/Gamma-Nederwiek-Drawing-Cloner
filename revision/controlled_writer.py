@@ -2,8 +2,11 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-import csv, hashlib, json, os, shutil, subprocess, tempfile, time, uuid
+import csv, json, os, shutil, subprocess, tempfile, time, uuid
 from typing import List
+
+from runtime.console_text import decode_console
+from runtime.hashing import sha256_file
 
 WRITER_VERSION='0.4B.2.6.2-shutdown-guard'
 
@@ -57,25 +60,14 @@ class ControlledRevisionWriter:
         with src.open('rb',buffering=0) as a,tmp.open('wb',buffering=0) as b:shutil.copyfileobj(a,b,4*1024*1024);b.flush();os.fsync(b.fileno())
         if tmp.stat().st_size!=src.stat().st_size:tmp.unlink(missing_ok=True);raise OSError('Copy size mismatch')
         os.replace(tmp,dst);return dst
-    @staticmethod
-    def _decode(v):
-        if v is None:return ''
-        if isinstance(v,str):return v
-        if v.startswith(b'\xff\xfe') or (len(v)>4 and v[1:2]==b'\x00'):return v.decode('utf-16',errors='replace')
-        for enc in ('utf-8','cp1252'):
-            try:return v.decode(enc)
-            except UnicodeDecodeError:pass
-        return v.decode('utf-8',errors='replace')
+    # Shared decoder: see runtime/console_text.py (UTF-16LE without BOM).
+    _decode=staticmethod(decode_console)
     @staticmethod
     def _q(p):return str(Path(p).resolve()).replace('\\','/').replace('"','\\"')
     @staticmethod
     def _lisp(s):return str(s or '').replace('\\','\\\\').replace('"','\\"')
-    @staticmethod
-    def _sha(path):
-        h=hashlib.sha256()
-        with Path(path).open('rb') as f:
-            for block in iter(lambda:f.read(4*1024*1024),b''):h.update(block)
-        return h.hexdigest()
+    # Shared hasher: see runtime/hashing.py.
+    _sha = staticmethod(sha256_file)
     @staticmethod
     def load_ready_plans(path):
         data=json.loads(Path(path).read_text(encoding='utf-8'));return [p for p in data.get('plans',[]) if str(p.get('status','')).startswith('READY')]

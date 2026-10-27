@@ -37,7 +37,13 @@ class Scanner:
    if f.role=='DWG':d[f.identity].append(f)
   out=[]
   for ident,cs in sorted(d.items()):
-   dt=next((x.drawing_type for x in cs if x.drawing_type!='UNKNOWN'),'UNKNOWN');nums=sorted([x for x in cs if x.revision.isdigit()],key=lambda x:(int(x.revision),x.modified_iso),reverse=True);aa=sorted([x for x in cs if x.revision=='A'],key=lambda x:x.modified_iso,reverse=True);primary=(nums or aa or sorted(cs,key=lambda x:x.modified_iso,reverse=True))[0].path;donor=aa[0].path if aa else None;w=';'.join(sorted({x.warning for x in cs if x.warning}));out.append(DrawingGroup(ident,dt,cs,True,primary,donor,w))
+   types={x.drawing_type for x in cs if x.drawing_type!='UNKNOWN'}
+   dt=next((x.drawing_type for x in cs if x.drawing_type!='UNKNOWN'),'UNKNOWN')
+   # A pair whose filenames disagree on SP/AS/GA previously kept whichever type
+   # came first and lost the rest of the warnings to a single-field join.
+   warn={x.warning for x in cs if x.warning}
+   if len(types)>1:warn.add('DRAWING_TYPE_CONFLICT:'+'/'.join(sorted(types)))
+   nums=sorted([x for x in cs if x.revision.isdigit()],key=lambda x:(int(x.revision),x.modified_iso),reverse=True);aa=sorted([x for x in cs if x.revision=='A'],key=lambda x:x.modified_iso,reverse=True);primary=(nums or aa or sorted(cs,key=lambda x:x.modified_iso,reverse=True))[0].path;donor=aa[0].path if aa else None;out.append(DrawingGroup(ident,dt,cs,True,primary,donor,';'.join(sorted(warn))))
   return out
  @staticmethod
  def supporting(fs):

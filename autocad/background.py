@@ -2,6 +2,7 @@ from __future__ import annotations
 from pathlib import Path
 import os, shutil, subprocess, tempfile, time, uuid
 from models import JobResult
+from runtime.console_text import decode_console as static_decode_console
 
 class BackgroundEngine:
     """Core Console-only engine using pre-copied target DWG + QSAVE.
@@ -75,20 +76,7 @@ class BackgroundEngine:
         marker=Path(str(local)+'.gni.txt'); sc=self.make_script(job,mode); log=job/f'{mode}.log'
         cmd=[str(self.exe),'/i',str(local),'/s',str(sc),'/l','en-US']
         started=time.time()
-        def decode_console(value):
-            if value is None:
-                return ''
-            if isinstance(value, str):
-                return value
-            # AutoCAD 2018 Core Console commonly emits UTF-16LE without BOM.
-            if value.startswith(b'\xff\xfe') or (len(value) > 4 and value[1:2] == b'\x00'):
-                return value.decode('utf-16', errors='replace')
-            for encoding in ('utf-8', 'cp1252'):
-                try:
-                    return value.decode(encoding)
-                except UnicodeDecodeError:
-                    pass
-            return value.decode('utf-8', errors='replace')
+        decode_console=static_decode_console
         try:
             cp=subprocess.run(cmd,capture_output=True,text=False,timeout=self.timeout,cwd=str(job))
         except subprocess.TimeoutExpired as e:

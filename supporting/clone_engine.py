@@ -3,13 +3,14 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-import hashlib
 import json
 import os
 import shutil
 import time
 import uuid
 from typing import Iterable, List
+
+from runtime.hashing import sha256_file
 
 
 @dataclass
@@ -62,11 +63,8 @@ class SupportingCloneEngine:
 
     @staticmethod
     def sha256(path: Path) -> str:
-        digest = hashlib.sha256()
-        with path.open("rb") as stream:
-            for block in iter(lambda: stream.read(4 * 1024 * 1024), b""):
-                digest.update(block)
-        return digest.hexdigest()
+        # Shared hasher: see runtime/hashing.py.
+        return sha256_file(path)
 
     @staticmethod
     def _atomic_copy(source: Path, destination: Path):

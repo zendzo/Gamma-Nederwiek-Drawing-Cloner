@@ -4,7 +4,6 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 import csv
-import hashlib
 import json
 import os
 import subprocess
@@ -14,6 +13,8 @@ import uuid
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from typing import List
 
+from runtime.console_text import decode_console
+from runtime.hashing import sha256_file
 from runtime.process_tracking import run_console
 
 VALIDATOR_VERSION = "0.4C.6-parallel-validator"
@@ -75,28 +76,11 @@ class StableReopenValidator:
         self.runtime_lisp = self.runtime_root / "reopen_validator.lsp"
         self.runtime_lisp.write_bytes(self.lisp_source.read_bytes())
 
-    @staticmethod
-    def _sha256(path):
-        digest = hashlib.sha256()
-        with Path(path).open("rb") as stream:
-            for block in iter(lambda: stream.read(4 * 1024 * 1024), b""):
-                digest.update(block)
-        return digest.hexdigest()
+    # Shared hasher: see runtime/hashing.py.
+    _sha256 = staticmethod(sha256_file)
 
-    @staticmethod
-    def _decode(value):
-        if value is None:
-            return ""
-        if isinstance(value, str):
-            return value
-        if value.startswith(b"\xff\xfe") or (len(value) > 4 and value[1:2] == b"\x00"):
-            return value.decode("utf-16", errors="replace")
-        for encoding in ("utf-8", "cp1252"):
-            try:
-                return value.decode(encoding)
-            except UnicodeDecodeError:
-                pass
-        return value.decode("utf-8", errors="replace")
+    # Shared decoder: see runtime/console_text.py (UTF-16LE without BOM).
+    _decode = staticmethod(decode_console)
 
     @staticmethod
     def _scr_path(path):

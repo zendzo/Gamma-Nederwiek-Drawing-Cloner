@@ -14,6 +14,8 @@ import uuid
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from typing import List
 
+from runtime.console_text import decode_console
+from runtime.hashing import sha256_file
 from runtime.process_tracking import run_console
 
 PDF_PUBLISHER_VERSION = "0.4C.6-parallel-plotter"
@@ -102,12 +104,8 @@ class PdfPublisher:
         published = any(pair.get("status") == "PDF_PAIR_PUBLISHED" for pair in pair_results)
         return outputs, str(payload.get("config_signature", "")), published
 
-    @staticmethod
-    def _sha(path):
-        h = hashlib.sha256()
-        with Path(path).open("rb") as f:
-            for block in iter(lambda: f.read(4 * 1024 * 1024), b""): h.update(block)
-        return h.hexdigest()
+    # Hasher shared with the other engines (kept as an alias; see runtime/hashing.py).
+    _sha = staticmethod(sha256_file)
 
     @staticmethod
     def _inside(path, root):
@@ -165,8 +163,9 @@ class PdfPublisher:
         except subprocess.TimeoutExpired as error:
             log.write_text("TIMEOUT after " + str(self.timeout) + "s\n", encoding="utf-8", errors="replace")
             raise PdfPublishError(revision + ":PDF_PLOT_TIMEOUT; stage=" + str(stage)) from error
-        output = (cp.stdout or b"") + b"\n" + (cp.stderr or b"")
-        text = output.decode("utf-16le", errors="replace") if (b"\x00" in output[:256]) else output.decode("utf-8", errors="replace")
+        # Shared decoder: a mixed buffer used to be guessed as one encoding, so a
+        # failed plot could log mojibake and never match PDF_PLOTTER_LOAD_MARKER.
+        text = decode_console(cp.stdout) + "\n" + decode_console(cp.stderr)
         log.write_text("EXIT_CODE=" + str(cp.returncode) + "\n" + text, encoding="utf-8", errors="replace")
         if PDF_PLOTTER_LOAD_MARKER not in text:
             raise PdfPublishError(revision + ":PLOTTER_LISP_NOT_LOADED; log=" + str(log))

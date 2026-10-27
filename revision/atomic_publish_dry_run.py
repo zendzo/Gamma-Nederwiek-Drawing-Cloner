@@ -3,12 +3,14 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-import hashlib
 import json
 import os
 import tempfile
 import uuid
 from typing import Dict, List
+
+from runtime.hashing import sha256_file
+from runtime.parallel import run_pool
 
 DRY_RUN_VERSION = "0.4C.2A-atomic-publisher-dry-run"
 
@@ -63,14 +65,10 @@ class AtomicPublisherDryRun:
         self.backup_root = self.bundle_root / "_GNI_BACKUP"
         self.staging_root = self.bundle_root / "_GNI_STAGING"
         self.asset_root = self.application_root / "resources" / "reference_images"
+        self._asset_cache = {}
 
-    @staticmethod
-    def _sha256(path):
-        digest = hashlib.sha256()
-        with Path(path).open("rb") as stream:
-            for block in iter(lambda: stream.read(4 * 1024 * 1024), b""):
-                digest.update(block)
-        return digest.hexdigest()
+    # Shared hasher: see runtime/hashing.py.
+    _sha256 = staticmethod(sha256_file)
 
     @staticmethod
     def _inside(path, parent):
@@ -259,6 +257,18 @@ class AtomicPublisherDryRun:
         return item
 
     def _inspect_assets(self, drawing_type):
+        # The reference PNGs are shared inputs that every pair of the same
+        # drawing type re-hashes into the same two destinations, so the result
+        # is memoised per type for the lifetime of this dry run instead of being
+        # recomputed (and re-hashed) once per pair.
+        key = str(drawing_type).upper()
+        cached = self._asset_cache.get(key)
+        if cached is None:
+            cached = self._inspect_assets_uncached(key)
+            self._asset_cache[key] = cached
+        return cached
+
+    def _inspect_assets_uncached(self, drawing_type):
         type_folder = self.TYPE_FOLDERS[drawing_type.upper()]
         results = []
         for name in ("SEAtrium_Ge_.PNG", "Tennet LogO New.PNG"):
@@ -358,8 +368,16 @@ class AtomicPublisherDryRun:
         )
         return result
 
-    def inspect_many(self, pairs):
-        return [self.inspect_pair(pair) for pair in pairs]
+    def inspect_many(self, pairs, workers=1, on_result=None, should_cancel=None):
+        """Inspect pairs, optionally in parallel, returning them in input order.
+
+        Same contract as the writer/validator/PDF engines: ``on_result`` fires in
+        completion order, the returned list is re-sorted into plan order, and
+        ``should_cancel`` stops the pool between pairs.
+        """
+        return run_pool(
+            self.inspect_pair, pairs, workers, on_result, should_cancel
+        )
 
     @staticmethod
     def write_report(bundle_root, results):
