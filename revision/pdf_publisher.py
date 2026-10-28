@@ -324,6 +324,12 @@ class PdfPublisher:
     def write_report(self, results):
         path=self.reports/"pdf_publish_report.json"
         unchanged=sum(output.status=="PDF_UNCHANGED" for pair in results for output in pair.outputs)
-        payload={"schema":"GNI-PDF-Publisher-0.4C.6","version":PDF_PUBLISHER_VERSION,"generated_at":datetime.now().astimezone().isoformat(),"config_signature":self.config_signature,"summary":{"pairs":len(results),"published":sum(x.status=="PDF_PAIR_PUBLISHED" for x in results),"unchanged":unchanged,"failed":sum(x.status!="PDF_PAIR_PUBLISHED" for x in results)},"results":[asdict(x) for x in results]}
+        failed=sum(x.status!="PDF_PAIR_PUBLISHED" for x in results)
+        # A run that left one or more pairs failed still writes its report, so
+        # without this flag _report_state() saw a report file and marked the PDF
+        # stage DONE. The primary button then jumped to "Open Reports" and the
+        # failed pairs could only be retried from Advanced. Mark the batch
+        # partial instead; the report stays a valid resume record either way.
+        payload={"schema":"GNI-PDF-Publisher-0.4C.6","version":PDF_PUBLISHER_VERSION,"generated_at":datetime.now().astimezone().isoformat(),"config_signature":self.config_signature,"complete":failed==0,"summary":{"pairs":len(results),"published":sum(x.status=="PDF_PAIR_PUBLISHED" for x in results),"unchanged":unchanged,"failed":failed},"results":[asdict(x) for x in results]}
         temp=path.with_suffix(".json.tmp");temp.write_text(json.dumps(payload,indent=2,ensure_ascii=False),encoding="utf-8");os.replace(temp,path);return path
 

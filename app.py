@@ -1,6 +1,7 @@
 import sys
 from pathlib import Path
 from PySide6.QtCore import Qt,QTimer
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import *
 from config.settings import Settings
 from destination.builder import DestinationBuilder
@@ -17,7 +18,7 @@ STAGE_REPORTS={'destination':'destination_manifest.json','clone':'supporting_fil
 AUTO_STAGES=('scan','destination','clone','discovery','plan','writer','validator','dryrun')
 class Main(QMainWindow):
  def __init__(self):
-  super().__init__();self.bg=BackgroundOperationController(self);self.bg.progress.connect(self._bg_progress);self.bg.status.connect(self.status_update_safe);self.bg.finished.connect(self._bg_finished);self.bg.failed.connect(self._bg_failed);self.resize(1500,850);self.setWindowTitle('Gamma to Nederwiek - Revision Migration (0.4C.6 - publish gate loop fix)');self.s=Settings.load(CFG);self.files=[];self.groups=[];self.support=[];self._chain=False;self._skipped=set();self._running_stage=None;self._busy=False
+  super().__init__();self.setWindowIcon(QIcon(str(BASE/'resources'/'app_icon.ico')));self.bg=BackgroundOperationController(self);self.bg.progress.connect(self._bg_progress);self.bg.status.connect(self.status_update_safe);self.bg.finished.connect(self._bg_finished);self.bg.failed.connect(self._bg_failed);self.resize(1500,850);self.setWindowTitle('Gamma to Nederwiek - Revision Migration (0.4C.15 - new job reset)');self.s=Settings.load(CFG);self._finished_root=None;self.files=[];self.groups=[];self.support=[];self._chain=False;self._skipped=set();self._running_stage=None;self._busy=False
   tabs=QTabWidget();self.setCentralWidget(tabs);w=QWidget();tabs.addTab(w,'Setup');l=QVBoxLayout(w);f=QFormLayout();self.src=QLineEdit(self.s.source_folder);self.dst=QLineEdit(self.s.destination_root);self.bundle=QLineEdit(self.s.destination_bundle_name);self.exe=QLineEdit(self.s.core_console)
   for label,e,folder in [('Source',self.src,True),('Destination root',self.dst,True),('Bundle name',self.bundle,None),('accoreconsole.exe',self.exe,False)]:f.addRow(label,self.browse(e,folder) if folder is not None else e)
   l.addLayout(f);self.maped=[]
@@ -25,6 +26,10 @@ class Main(QMainWindow):
   for label,attr,default in [('Project from','project_from','IJMUIDEN VER GAMMA'),('Project to','project_to','NEDERWIEK BETA'),('Drawing from','drawing_from','2013J310015'),('Drawing to','drawing_to','I301-J30019'),('Long ref from','long_from','OEPA230146'),('Long ref to','long_to','OEPA240101'),('Short ref from','short_from','230146'),('Short ref to','short_to','240101'),('Contractor doc-id from','contractor_doc_from','2GWG'),('Contractor doc-id to','contractor_doc_to','2GWN')]:e=QLineEdit(getattr(self.s,attr,default));self.maped.append((attr,e));mf.addRow(label,e)
   l.addWidget(m);pg=QGroupBox('Migration pipeline');pv=QVBoxLayout(pg);self.stage_tbl=self.table(['Step','Stage','Status','Report']);self.stage_tbl.setEditTriggers(QAbstractItemView.NoEditTriggers);self.stage_tbl.setSelectionMode(QAbstractItemView.SingleSelection);self.stage_tbl.setSelectionBehavior(QAbstractItemView.SelectRows);self.stage_tbl.setMaximumHeight(230);self.stage_tbl.cellDoubleClicked.connect(self.open_stage_report);pv.addWidget(self.stage_tbl)
   self.primary=QPushButton('Run: Scan source');self.primary.setMinimumHeight(38);self.primary.clicked.connect(self.run_next_stage);self.primary.setDefault(True);pv.addWidget(self.primary)
+  # Only reachable once the PDF stage is complete and nothing is running; the
+  # pipeline derives every row from report files, so this clears session state
+  # instead of deleting evidence on disk.
+  self.newjobb=QPushButton('New Job (clear inputs)');self.newjobb.setEnabled(False);self.newjobb.setToolTip('Available after the PDF stage is complete. Clears every result, table and input field so the next job starts from Scan.');self.newjobb.clicked.connect(self.new_job);pv.addWidget(self.newjobb)
   prow=QHBoxLayout();self.cancelb=QPushButton('Cancel Safely');self.cancelb.setEnabled(False);self.cancelb.clicked.connect(self.cancel_unified_operation);self.workers=QSpinBox();self.workers.setRange(1,16);self.workers.setValue(max(1,min(16,int(getattr(self.s,'workers',4)))));self.workers.setToolTip('Concurrent Core Console processes for the writer, validator and PDF stages. 4-6 is a good starting point.');prow.addWidget(self.cancelb);prow.addStretch();prow.addWidget(QLabel('Parallel workers'));prow.addWidget(self.workers);pv.addLayout(prow)
   self.prog=QProgressBar();pv.addWidget(self.prog);self.status=QLabel('Ready. The button runs every remaining step up to the publish gate.');self.status.setWordWrap(True);pv.addWidget(self.status)
   self.adv=QGroupBox('Advanced - run or re-run one stage');self.adv.setCheckable(True);self.adv.setChecked(False);ag=QGridLayout(self.adv);self.stage_buttons={}
@@ -41,9 +46,13 @@ class Main(QMainWindow):
   for button in self.stage_buttons.values():button.setEnabled(bool(on) and not self._busy)
  def stage_report_path(self,key):
   name=STAGE_REPORTS.get(key);return self.reports_root()/name if name else None
- def _report_state(self,key):
-  """Return 'complete', 'incomplete' or 'missing' for a stage report."""
-  path=self.stage_report_path(key)
+ def _report_state(self,key,root=None):
+  """Return 'complete', 'incomplete' or 'missing' for a stage report.
+
+  `root` overrides the reports folder, so a reset can inspect the bundle the
+  finished job actually used instead of whatever the fields now point at."""
+  name=STAGE_REPORTS.get(key)
+  path=(Path(root)/name) if root and name else self.stage_report_path(key)
   if not path or not path.is_file():return 'missing'
   import json
   try:payload=json.loads(path.read_text(encoding='utf-8'))
@@ -55,12 +64,12 @@ class Main(QMainWindow):
   # and keep the old behaviour so upgrades do not re-run everything.
   if payload.get('complete') is False:return 'incomplete'
   return 'complete'
- def _stage_complete(self,key):
+ def _stage_complete(self,key,root=None):
   if key=='scan':return bool(self.files)
   if key in self._skipped:return True
-  state=self._report_state(key)
+  state=self._report_state(key,root)
   if state!='complete':return False
-  if key=='discovery':return (self.reports_root()/'title_block_discovery_fields.csv').is_file()
+  if key=='discovery':return ((Path(root) if root else self.reports_root())/'title_block_discovery_fields.csv').is_file()
   return True
  def next_stage(self):
   if not self.files:return ('scan','Scan source')
@@ -80,7 +89,99 @@ class Main(QMainWindow):
    else:state='PENDING'
    for column,value in enumerate([str(row+1),label,state,path.name if path else '(this session)']):self.stage_tbl.setItem(row,column,QTableWidgetItem(value))
    if key==nxt_key:self.stage_tbl.selectRow(row)
+  # Remember the bundle of the finished job. The operator may edit Destination
+  # root / Bundle name *before* pressing New Job (to avoid replacing the old
+  # bundle), and the reset must still find the reports it is about to delete.
+  # The PDF report is the terminal stage: reaching it proves every earlier one
+  # ran, and `clone` may legitimately have been skipped with no report at all.
+  if self._report_state('pdf')=='complete':self._finished_root=str(self.reports_root())
   self.refresh_primary()
+  if hasattr(self,'newjobb'):self.newjobb.setEnabled(self.job_finished())
+ def job_finished(self):
+  """True when the last job finished and nothing is running.
+
+  Deliberately not `self.files`/`next_stage()`: those follow the current input
+  fields, so a session restored from disk (no scan in memory) or one where the
+  operator already typed a new bundle would look unfinished forever."""
+  if self._busy or self._chain or self._running_stage:return False
+  root=self._finished_root
+  return bool(root) and self._report_state('pdf',root)=='complete'
+ def _new_job_defaults(self):
+  """Persisted values the inputs are restored to by new_job().
+
+  Read on demand instead of cached: settings.json is machine-local state and a
+  stale in-memory copy would restore values the operator had already changed."""
+  return Settings.load(CFG)
+ def new_job(self):
+  """Clear every result, table, input and report so the next job starts at Scan."""
+  # Workers release their QThread after _bg_finished, so a live thread here
+  # means a late signal; clearing UI under it would race the next stage.
+  workers=[w for w in (getattr(self,'discovery_worker',None),getattr(self,'plan_worker',None),getattr(self,'pdf_worker',None)) if w is not None and w.isRunning()]
+  if workers or (self.bg.worker and self.bg.worker.isRunning()):QMessageBox.information(self,'New Job','A stage is still shutting down. Wait for it to finish, then press New Job again.');return False
+  if not self.job_finished():QMessageBox.information(self,'New Job','This job is not finished yet. New Job is only available after the PDF stage is complete. Finish the pipeline first, then press New Job again.');return False
+  # The finished job may not be the bundle the fields point at any more: the
+  # operator is allowed to type a new bundle name first. Delete the reports of
+  # the job that actually finished, and warn about where the next one lands.
+  root=Path(self._finished_root or self.reports_root())
+  clearing=f'The reports and checkpoints of the finished job will be deleted, and every table and input field is cleared.\n\nReports folder:\n{root}'
+  existing=self._existing_bundle()
+  if existing:
+   path,count=existing
+   answer=QMessageBox.warning(self,'Bundle already exists - replace it?','A bundle with this name already exists in the destination folder:\n\n'+f'{path}\n({count} file(s) inside)\n\n'+'Starting this new job reuses that same bundle. When the pipeline reaches publishing, files that already exist there are REPLACED (the previous DWG/PDF is copied to _GNI_BACKUP first).\n\nTo keep the existing bundle, change Bundle name or Destination root before starting.\n\n'+clearing+'\n\nStart a new job anyway?',QMessageBox.Yes|QMessageBox.No,QMessageBox.No)
+  else:
+   answer=QMessageBox.question(self,'Start a new job?',clearing+'\n\nThe published DWGs and PDFs in the bundle are not touched.\n\nStart a new job?',QMessageBox.Yes|QMessageBox.No,QMessageBox.No)
+  if answer!=QMessageBox.Yes:return False
+  # Save first: the fields still hold the job's own values, so the defaults
+  # restored below are the ones the operator last used.
+  self.save()
+  # The pipeline is derived from these files, so they are the real reset. Old
+  # checkpoints would otherwise make the writer/PDF stages skip matching pairs
+  # on the next run; gate_rejected/failures/*.stale are per-run too.
+  removed,left=self._clear_reports(root)
+  self.files=[];self.groups=[];self.support=[];self.support_results=[];self.discovery_results=[];self.revision_plans=[];self._skipped=set();self._chain=False;self._running_stage=None
+  for name in ('tbl','stbl','dtbl','ptbl','rtbl'):
+   table=getattr(self,name,None)
+   if table is not None:table.setRowCount(0)
+  self._report_paths=[];self._finished_root=None
+  # Inputs go back to the persisted defaults, not to blank: an empty Source
+  # would make Scan impossible until the operator retyped it.
+  defaults=self._new_job_defaults()
+  self.src.setText(defaults.source_folder);self.dst.setText(defaults.destination_root);self.bundle.setText(defaults.destination_bundle_name);self.exe.setText(defaults.core_console)
+  for attr,edit in self.maped:edit.setText(getattr(defaults,attr,''))
+  self.workers.setValue(max(1,min(16,int(getattr(defaults,'workers',4)))))
+  self.prog.setRange(0,100);self.prog.setValue(0)
+  message=f'New job ready. {removed} report/checkpoint file(s) cleared; all tables and inputs reset. The button runs every step up to the publish gate.'
+  if left:message+=f' {left} file(s) could not be deleted (in use?) - close AutoCAD/Core Console windows and retry.'
+  self.status.setText(message);self.refresh_pipeline();return True
+ def _existing_bundle(self):
+  """(path, file count) of the bundle the current fields point at, or None.
+
+  New Job keeps the destination inputs, so the usual case is a second run into
+  the same bundle - and publishing replaces whatever is already in it."""
+  name=self.bundle.text().strip()
+  if not name:return None
+  try:path=Path(self.dst.text()).expanduser()/name
+  except (OSError,ValueError):return None
+  if not path.is_dir():return None
+  count=0
+  try:
+   for item in path.rglob('*'):
+    if item.is_file():count+=1
+  except OSError:pass
+  return path,count
+ def _clear_reports(self,root=None):
+  """Delete this job's handoff files; returns (removed, left). Never raises.
+
+  Only the per-run evidence goes: published DWGs, PDFs and backups live outside
+  _GNI_REPORTS and are left alone."""
+  root=Path(root or self.reports_root())
+  removed=left=0
+  if not root.is_dir():return removed,left
+  for path in sorted(root.iterdir()):
+   if not path.is_file():continue
+   try:path.unlink();removed+=1
+   except OSError:left+=1
+  return removed,left
  def refresh_primary(self):
   nxt=self.next_stage()
   # Nothing pending: the button is a shortcut to the evidence, not a dead end.
@@ -316,7 +417,7 @@ class Main(QMainWindow):
   child_registry.cancel_shutdown()
   event.accept()
  def _set_pipeline_busy(self,busy):
-  self._busy=busy;self.primary.setEnabled(not busy);self.workers.setEnabled(not busy);self.cloneb.setEnabled(not busy);self._sync_advanced_buttons(self.adv.isChecked());self.cancelb.setEnabled(busy)
+  self._busy=busy;self.primary.setEnabled(not busy);self.workers.setEnabled(not busy);self.cloneb.setEnabled(not busy);self._sync_advanced_buttons(self.adv.isChecked());self.cancelb.setEnabled(busy);self.newjobb.setEnabled(not busy and self.job_finished())
  def _start_bg(self,operation,payload):
   self._set_pipeline_busy(True);self.prog.setRange(0,0);self.status.setText('Starting '+operation+'...');self.bg.start(operation,payload)
  def _bg_progress(self,current,total,identity,output,stage):
@@ -442,4 +543,4 @@ class Main(QMainWindow):
    removed,failed=prune_job_root(gni_temp_root(),keep_days=7)
    if removed or failed:self.status.setText(f'Temporary jobs: {removed} stale job folder(s) removed'+(f', {failed} could not be removed' if failed else ''))
   except Exception:pass
-if __name__=='__main__':app=QApplication(sys.argv);app.setStyle('Fusion');w=Main();w.prune_temp_jobs();w.show();sys.exit(app.exec())
+if __name__=='__main__':app=QApplication(sys.argv);app.setStyle('Fusion');w=Main();app.setWindowIcon(w.windowIcon());w.prune_temp_jobs();w.show();sys.exit(app.exec())

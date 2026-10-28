@@ -270,9 +270,16 @@ class AtomicPublisherDryRun:
 
     def _inspect_assets_uncached(self, drawing_type):
         type_folder = self.TYPE_FOLDERS[drawing_type.upper()]
+        # Per-type source folder: GA pairs check GA rasters, SP pairs check SP.
+        # Copied from DestinationBuilder so both stages resolve assets the same
+        # way (builder owns the layout; dry run must not drift from it).
+        from destination.builder import DestinationBuilder
+        type_assets = DestinationBuilder(
+            self.bundle_root.parent, self.bundle_root.name, self.application_root
+        ).reference_assets(drawing_type)
         results = []
-        for name in ("SEAtrium_Ge_.PNG", "Tennet LogO New.PNG"):
-            source = self.asset_root / name
+        for source in type_assets:
+            name = source.name
             record = {
                 "name": name,
                 "source": str(source),

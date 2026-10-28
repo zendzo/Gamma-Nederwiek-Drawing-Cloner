@@ -8,8 +8,11 @@ only restyles; these tests fail if the duplication comes back.
 
 import os
 import unittest
+from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+RESOURCES = Path(__file__).resolve().parents[1] / "resources"
 
 import app as legacy
 
@@ -33,7 +36,8 @@ class ShellParityTests(unittest.TestCase):
             self.skipTest("app_modern unavailable")
         for name in ("next_stage", "_stage_complete", "_report_state",
                      "refresh_pipeline", "refresh_primary", "_advance_pipeline",
-                     "run_stage", "run_next_stage", "closeEvent"):
+                     "run_stage", "run_next_stage", "closeEvent",
+                     "new_job", "job_finished"):
             with self.subTest(method=name):
                 self.assertNotIn(
                     name,
@@ -96,6 +100,76 @@ class NavCaptionTests(unittest.TestCase):
                 # The header subtitle had the same stale-key bug.
                 self.assertIn(title, app_modern.PAGE_DESCRIPTIONS,
                               "no subtitle mapped for tab %r" % title)
+
+
+class AppIconTests(unittest.TestCase):
+    """The window icon must exist, carry small sizes, and have clean corners.
+
+    ``QIcon`` without a ``QApplication`` aborts the process, and a white-matte
+    source would show opaque corners on dark title bars. These checks catch a
+    missing/regressed asset before a real GUI run does.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_icon_assets_exist(self):
+        self.assertTrue((RESOURCES / "app_icon.ico").is_file())
+        self.assertTrue((RESOURCES / "app_icon.png").is_file())
+        self.assertTrue((RESOURCES / "app_icon_source.png").is_file())
+
+    def test_ico_contains_title_bar_and_large_sizes(self):
+        from PySide6.QtGui import QIcon
+        icon = QIcon(str(RESOURCES / "app_icon.ico"))
+        self.assertFalse(icon.isNull())
+        sizes = {size.width() for size in icon.availableSizes()}
+        self.assertTrue({16, 20, 24, 32, 48, 256} <= sizes, sizes)
+
+    def test_window_uses_transparent_icon(self):
+        from PySide6.QtCore import QSize
+        main = legacy.Main()
+        try:
+            icon = main.windowIcon()
+            self.assertFalse(icon.isNull())
+            corner = icon.pixmap(QSize(16, 16)).toImage().pixelColor(0, 0)
+            self.assertEqual(corner.alpha(), 0)
+        finally:
+            main.close()
+            main.deleteLater()
+
+
+class ModernReportsNavigationTests(unittest.TestCase):
+    """The modern shell must be able to show the Reports page.
+
+    ``app.Main.show_reports_tab`` navigates its central QTabWidget. The modern
+    shell replaces that widget with a QStackedWidget, and the inherited method
+    crashed with ``'QWidget' object has no attribute 'count'`` whenever the
+    primary button read "Open Reports".
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_show_reports_tab_uses_the_sidebar_stack(self):
+        if app_modern is None:  # pragma: no cover
+            self.skipTest("app_modern unavailable")
+        main = app_modern.ModernMain()
+        try:
+            reports = main._page_names.index("Reports")
+            main._show_page(0)
+            main.show_reports_tab()
+            self.assertEqual(main.page_stack.currentIndex(), reports)
+            self.assertTrue(main.nav_buttons[reports].isChecked())
+            self.assertEqual(main.modern_page_title.text(), "Reports")
+        finally:
+            main.close()
+            main.deleteLater()
 
 
 def _mean_rgb(image):

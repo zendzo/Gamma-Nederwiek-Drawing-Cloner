@@ -11,7 +11,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from revision.pdf_publisher import PdfPublisher, PdfOutput
+from revision.pdf_publisher import PdfPair, PdfOutput, PdfPublisher
 
 
 def _pdf_bytes():
@@ -33,6 +33,10 @@ class PdfResumeTests(unittest.TestCase):
         # and staging folders inside the temp dir.
         self.app = Path(__file__).resolve().parents[1]
         self.publisher = PdfPublisher(self.core, self.bundle, self.app)
+        # The publisher resolves its bundle path; Windows temp dirs use 8.3 short
+        # names, so the fixture must compare against the same resolved path or
+        # the resume check sees a different destination and replots everything.
+        self.bundle = self.publisher.bundle
         self.type_folder = self.publisher.TYPE_FOLDERS["GA"]
         self.dwgs = {}
         for revision in ("A", "00"):
@@ -134,6 +138,24 @@ class PdfReportTruthfulnessTests(unittest.TestCase):
     def test_incomplete_marker_tolerates_a_missing_report(self):
         with tempfile.TemporaryDirectory() as tmp:
             self.assertIsNone(PdfPublisher.mark_report_incomplete(Path(tmp) / "nope.json"))
+
+    def test_failed_batch_is_not_marked_complete(self):
+        # write_report() used to omit the flag, so a run with failures still
+        # read as DONE and the primary button offered "Open Reports".
+        with tempfile.TemporaryDirectory() as tmp:
+            publisher = PdfPublisher.__new__(PdfPublisher)
+            publisher.reports = Path(tmp)
+            publisher.config_signature = "sig"
+            ok = PdfPair("T1", "ID-OK", "GA", "PDF_PAIR_PUBLISHED")
+            bad = PdfPair("T2", "ID-BAD", "GA", "PDF_PUBLISH_FAILED_ROLLED_BACK")
+
+            path = publisher.write_report([ok])
+            self.assertIs(json.loads(path.read_text(encoding="utf-8"))["complete"], True)
+
+            path = publisher.write_report([ok, bad])
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            self.assertIs(payload["complete"], False)
+            self.assertEqual(payload["summary"]["failed"], 1)
 
 
 class PdfFailureVisibilityTests(unittest.TestCase):

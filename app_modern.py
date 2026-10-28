@@ -240,6 +240,26 @@ QPushButton#primaryButton {
 QPushButton#primaryButton:hover {
     background-color: #15803D;
 }
+QPushButton#secondaryButton {
+    background-color: #FFFFFF;
+    color: #1D4ED8;
+    border: 1px solid #93C5FD;
+}
+
+QPushButton#secondaryButton:hover {
+    background-color: #EFF6FF;
+    border-color: #60A5FA;
+}
+
+QPushButton#secondaryButton:pressed {
+    background-color: #DBEAFE;
+}
+
+QPushButton#secondaryButton:disabled {
+    background-color: #F8FAFC;
+    color: #CBD5E1;
+    border-color: #E2E8F0;
+}
 QPushButton#dangerButton {
     background-color: #FFFFFF;
     color: #B91C1C;
@@ -538,9 +558,30 @@ class ModernMain(legacy.Main):
         if title == "Reports":
             self.refresh_reports()
 
+    def show_reports_tab(self) -> None:
+        """Bring the Reports page forward in the sidebar shell.
+
+        app.Main assumes its central widget is still the legacy QTabWidget. The
+        modern shell swaps that for a QStackedWidget, so the inherited method
+        raised ``AttributeError: 'QWidget' object has no attribute 'count'`` as
+        soon as "Open Reports" (or the scan row) called it. Navigation is pure
+        presentation, so it belongs here rather than in the controller.
+        """
+        try:
+            index = self._page_names.index("Reports")
+        except (AttributeError, ValueError):
+            return
+        self._show_page(index)
+        if 0 <= index < len(self.nav_buttons):
+            self.nav_buttons[index].setChecked(True)
+
     def _apply_widget_roles(self) -> None:
         if hasattr(self, "primary"):
             self.primary.setObjectName("primaryButton")
+        # Secondary action directly under the primary button; it only enables
+        # once the controller reports the job finished (app.Main::job_finished).
+        if hasattr(self, "newjobb"):
+            self.newjobb.setObjectName("secondaryButton")
         # The QSS targets QSpinBox#workerInput / QLabel#workerLabel; without these
         # object names the worker controls fell back to the default Fusion look.
         if hasattr(self, "workers"):
@@ -614,6 +655,9 @@ def main() -> int:
     application.setOrganizationName("Seatrium")
     application.setStyle("Fusion")
     window = ModernMain()
+    # Parent-less dialogs inherit the application icon; the main window already
+    # carries it for the title bar and taskbar button.
+    application.setWindowIcon(window.windowIcon())
     window.show()
     return application.exec()
 

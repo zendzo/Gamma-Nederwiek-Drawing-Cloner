@@ -45,14 +45,48 @@ class DestinationBuilder:
     )
 
     CAD_FOLDERS = tuple(item for item in FOLDERS if item.endswith("/CAD"))
+    # Reference rasters are owned per drawing type: SP/CAD only ever receives
+    # the files from resources/reference_images/SP, GA/CAD only those from GA.
+    # Both revisions (A and 00) of one type share the same source folder.
+    TYPE_FOLDERS = {"SP": "1. SP", "AS": "2. AS", "GA": "3. GA"}
     REQUIRED_ASSETS = ("SEAtrium_Ge_.PNG", "Tennet LogO New.PNG")
+    REFERENCE_FOLDER = "reference_images"
 
     def __init__(self, destination_root, bundle_name, application_root):
         self.destination_root = Path(destination_root).expanduser().resolve()
         self.bundle_name = self._validate_bundle_name(bundle_name)
         self.application_root = Path(application_root).resolve()
         self.bundle_root = self.destination_root / self.bundle_name
-        self.asset_root = self.application_root / "resources" / "reference_images"
+        self.resources_root = self.application_root / "resources"
+        self.asset_root = (self.resources_root / self.REFERENCE_FOLDER).resolve()
+
+    def _relative(self, path):
+        """Render a path relative to resources/ so reports stay readable."""
+        try:
+            return str(Path(path).resolve().relative_to(self.resources_root))
+        except ValueError:
+            return str(path)
+
+    def reference_dir(self, drawing_type):
+        """The reference folder for one drawing type (SP, AS or GA)."""
+        key = str(drawing_type).strip().upper()
+        if key not in self.TYPE_FOLDERS:
+            raise ValueError("Unknown drawing type for reference assets: " + str(drawing_type))
+        return self.asset_root / key
+
+    def reference_assets(self, drawing_type):
+        """The required rasters for one drawing type, in a stable order."""
+        folder = self.reference_dir(drawing_type)
+        return [folder / name for name in self.REQUIRED_ASSETS]
+
+    def cad_folders_for(self, drawing_type):
+        """The A/ and 00/ CAD folders that belong to one drawing type."""
+        type_folder = self.TYPE_FOLDERS[str(drawing_type).strip().upper()]
+        return [
+            relative
+            for relative in self.CAD_FOLDERS
+            if Path(relative).parts[1] == type_folder
+        ]
 
     RESERVED_NAMES = frozenset(
         {"con", "prn", "aux", "nul"}
@@ -102,18 +136,25 @@ class DestinationBuilder:
             raise ValueError("Source folder cannot be inside the destination bundle")
 
     def _validate_assets(self):
-        assets = []
+        """Return {type: [asset, ...]} and refuse to build with a gap.
+
+        Every type is checked separately so a copy failure can name the exact
+        folder ("SP: Tennet LogO New.PNG") instead of a shared list of names.
+        """
+        assets = {}
         missing = []
-        for name in self.REQUIRED_ASSETS:
-            asset = self.asset_root / name
-            if asset.is_file() and asset.stat().st_size > 0:
-                assets.append(asset)
-            else:
-                missing.append(name)
+        for drawing_type in self.TYPE_FOLDERS:
+            found = []
+            for asset in self.reference_assets(drawing_type):
+                if asset.is_file() and asset.stat().st_size > 0:
+                    found.append(asset)
+                else:
+                    missing.append(f"{drawing_type}: {asset.name}")
+            assets[drawing_type] = found
         if missing:
             raise FileNotFoundError(
-                "Embedded raster assets missing: " + ", ".join(missing)
-                + "; expected folder: " + str(self.asset_root)
+                "Reference rasters missing: " + ", ".join(missing)
+                + "; expected per-type folders under: " + str(self.asset_root)
             )
         return assets
 
@@ -169,11 +210,22 @@ class DestinationBuilder:
         manifest = report_folder / "destination_manifest.json"
         result.manifest_path = str(manifest)
         payload = {
-            "schema": "GNI-Destination-Manifest-1.2",
+            "schema": "GNI-Destination-Manifest-1.3",
             "generated_at": datetime.now().astimezone().isoformat(),
             "bundle_root": str(self.bundle_root),
             "required_folders": list(self.FOLDERS),
-            "embedded_assets": list(self.REQUIRED_ASSETS),
+            # 1.3: references are per drawing type. The flat "embedded_assets"
+            # name list could not express that SP/AS/GA now have separate
+            # sources, so the manifest records the type, source folder and the
+            # exact CAD folders each type feeds.
+            "reference_assets": {
+                drawing_type: {
+                    "source_folder": self._relative(self.reference_dir(drawing_type)),
+                    "asset_names": list(self.REQUIRED_ASSETS),
+                    "cad_folders": self.cad_folders_for(drawing_type),
+                }
+                for drawing_type in self.TYPE_FOLDERS
+            },
             "result": asdict(result),
         }
         temporary = manifest.with_suffix(".json.tmp")
@@ -202,13 +254,17 @@ class DestinationBuilder:
                 result.created_folders.append(str(folder))
 
         if copy_assets_to_all_cad:
-            for relative in self.CAD_FOLDERS:
-                cad_folder = self.bundle_root / Path(relative)
-                for asset in assets:
-                    destination = cad_folder / asset.name
-                    if not self._files_equal(asset, destination):
-                        self._atomic_copy(asset, destination)
-                        result.copied_assets.append(str(destination))
+            # Copy each type's rasters into that type's two CAD folders only.
+            # Comparing content keeps Build destination cheap and idempotent:
+            # unchanged files are not rewritten, changed ones are.
+            for drawing_type, type_assets in assets.items():
+                for relative in self.cad_folders_for(drawing_type):
+                    cad_folder = self.bundle_root / Path(relative)
+                    for asset in type_assets:
+                        destination = cad_folder / asset.name
+                        if not self._files_equal(asset, destination):
+                            self._atomic_copy(asset, destination)
+                            result.copied_assets.append(str(destination))
 
         missing = []
         wrong_type = []

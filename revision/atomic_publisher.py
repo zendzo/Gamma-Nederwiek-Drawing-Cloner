@@ -85,9 +85,19 @@ class AtomicPublisher:
         self.reports_root = self.bundle_root / "_GNI_REPORTS"
         self.staging_root = self.bundle_root / "_GNI_STAGING"
         self.backup_root = self.bundle_root / "_GNI_BACKUP"
+        # The publisher never picks a source itself: dry run records the exact
+        # per-type path (resources/reference_images/SP|AS|GA) per pair. This
+        # mirrors DestinationBuilder for callers that need to resolve one.
         self.asset_root = self.application_root / "resources" / "reference_images"
         for path in (self.reports_root, self.staging_root, self.backup_root):
             path.mkdir(parents=True, exist_ok=True)
+
+    def asset_source(self, drawing_type, name):
+        """The per-type reference path for one asset name."""
+        from destination.builder import DestinationBuilder
+        return DestinationBuilder(
+            self.bundle_root.parent, self.bundle_root.name, self.application_root
+        ).reference_dir(drawing_type) / name
 
     # Shared hasher: see runtime/hashing.py.
     _sha256 = staticmethod(sha256_file)
