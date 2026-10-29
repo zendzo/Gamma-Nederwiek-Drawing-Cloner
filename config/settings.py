@@ -21,4 +21,16 @@ class Settings:
         known={field.name for field in fields(cls)}
         return cls(**{key:value for key,value in data.items() if key in known})
     def save(self,p):
-        p=Path(p);p.parent.mkdir(parents=True,exist_ok=True);p.write_text(json.dumps(asdict(self),indent=2),encoding='utf-8')
+        """Write settings, falling back to the writable root instead of raising.
+
+        A portable copy can sit in a folder the user cannot write (``Program
+        Files``, a read-only share). ``save`` is called at the start of nearly
+        every button handler, so an unhandled ``PermissionError`` here would
+        look like a broken app. The fallback keeps the session working and the
+        next ``Settings.load`` picks the same file up.
+        """
+        p=Path(p)
+        try:p.parent.mkdir(parents=True,exist_ok=True);p.write_text(json.dumps(asdict(self),indent=2),encoding='utf-8');return p
+        except OSError:
+            from runtime.paths import fallback_settings_path
+            fallback=fallback_settings_path();fallback.parent.mkdir(parents=True,exist_ok=True);fallback.write_text(json.dumps(asdict(self),indent=2),encoding='utf-8');return fallback

@@ -13,14 +13,16 @@ from revision.pdf_worker import PdfPublishWorker
 from runtime.production_workers import DiscoveryWorker, ProductionPlanWorker
 from runtime.background_controller import BackgroundOperationController
 from reporting.dashboard import ReportDashboard
-BASE=Path(__file__).resolve().parent;CFG=BASE/'config'/'settings.json'
+from runtime import fonts,logging_setup,paths
+from runtime.coreconsole import detect as detect_core_console
+BASE=paths.app_root();CFG=paths.settings_path()
 PIPELINE=(('scan','Scan source'),('destination','Build destination'),('clone','Clone supporting files'),('discovery','Discover title blocks'),('plan','Build revision plan'),('writer','Stable external writer'),('validator','Reopen validator'),('dryrun','Atomic publish dry run'),('publish','Atomic publisher'),('pdf','Publish PDFs'))
 STAGE_REPORTS={'destination':'destination_manifest.json','clone':'supporting_file_clone_report.json','discovery':'title_block_discovery_report.json','plan':'revision_pilot_write_plan.json','writer':'stable_external_writer_report.json','validator':'reopen_validation_report.json','dryrun':'atomic_publish_dry_run_report.json','publish':'atomic_publish_report.json','pdf':'pdf_publish_report.json'}
 AUTO_STAGES=('scan','destination','clone','discovery','plan','writer','validator','dryrun')
 class Main(QMainWindow):
  def __init__(self):
-  super().__init__();self.setWindowIcon(QIcon(str(BASE/'resources'/'app_icon.ico')));self.bg=BackgroundOperationController(self);self.bg.progress.connect(self._bg_progress);self.bg.status.connect(self.status_update_safe);self.bg.finished.connect(self._bg_finished);self.bg.failed.connect(self._bg_failed);self.resize(1500,850);self.setWindowTitle('Gamma to Nederwiek - Revision Migration (0.4C.15 - new job reset)');self.s=Settings.load(CFG);self._finished_root=None;self.files=[];self.groups=[];self.support=[];self._chain=False;self._skipped=set();self._running_stage=None;self._busy=False
-  tabs=QTabWidget();self.setCentralWidget(tabs);w=QWidget();tabs.addTab(w,'Setup');l=QVBoxLayout(w);f=QFormLayout();self.src=QLineEdit(self.s.source_folder);self.dst=QLineEdit(self.s.destination_root);self.bundle=QLineEdit(self.s.destination_bundle_name);self.exe=QLineEdit(self.s.core_console)
+  super().__init__();self.setWindowIcon(QIcon(str(BASE/'resources'/'app_icon.ico')));self.bg=BackgroundOperationController(self);self.bg.progress.connect(self._bg_progress);self.bg.status.connect(self.status_update_safe);self.bg.finished.connect(self._bg_finished);self.bg.failed.connect(self._bg_failed);self.resize(1500,850);self.setWindowTitle(f'Gamma to Nederwiek - Revision Migration ({paths.version()} - new job reset)');self.s=Settings.load(CFG);self._finished_root=None;self.files=[];self.groups=[];self.support=[];self._chain=False;self._skipped=set();self._running_stage=None;self._busy=False
+  tabs=QTabWidget();self.setCentralWidget(tabs);w=QWidget();tabs.addTab(w,'Setup');l=QVBoxLayout(w);f=QFormLayout();self.src=QLineEdit(self.s.source_folder);self.dst=QLineEdit(self.s.destination_root);self.bundle=QLineEdit(self.s.destination_bundle_name);self.exe=QLineEdit(self.s.core_console or detect_core_console())
   for label,e,folder in [('Source',self.src,True),('Destination root',self.dst,True),('Bundle name',self.bundle,None),('accoreconsole.exe',self.exe,False)]:f.addRow(label,self.browse(e,folder) if folder is not None else e)
   l.addLayout(f);self.maped=[]
   m=QGroupBox('Controlled replacement mapping');mf=QFormLayout(m)
@@ -545,4 +547,4 @@ class Main(QMainWindow):
    removed,failed=prune_job_root(gni_temp_root(),keep_days=7)
    if removed or failed:self.status.setText(f'Temporary jobs: {removed} stale job folder(s) removed'+(f', {failed} could not be removed' if failed else ''))
   except Exception:pass
-if __name__=='__main__':app=QApplication(sys.argv);app.setStyle('Fusion');w=Main();app.setWindowIcon(w.windowIcon());w.prune_temp_jobs();w.show();sys.exit(app.exec())
+if __name__=='__main__':logging_setup.setup();logging_setup.install_excepthook();app=QApplication(sys.argv);app.setStyle('Fusion');fonts.install();w=Main();app.setWindowIcon(w.windowIcon());w.prune_temp_jobs();w.show();sys.exit(app.exec())

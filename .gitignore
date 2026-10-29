@@ -19,6 +19,7 @@ htmlcov/
 # Virtual environments
 # ---------------------------------------------------------------
 .venv/
+.venv-build/
 venv/
 env/
 ENV/
@@ -30,6 +31,12 @@ backup_before_*/
 backup_*/
 *.bak
 *.orig
+
+# ---------------------------------------------------------------
+# Portable build output
+# ---------------------------------------------------------------
+release/
+packaging/version_info.txt
 
 # ---------------------------------------------------------------
 # Application runtime data

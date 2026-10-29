@@ -6,8 +6,8 @@ workers, settings, reports, and migration methods remain owned by app.Main.
 
 from __future__ import annotations
 
+import logging
 import sys
-from pathlib import Path
 
 from PySide6.QtCore import QByteArray, QSize, Qt, QTimer
 from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
 )
 
 import app as legacy
+from runtime import fonts, logging_setup, paths
 
 
 APP_TITLE = "Project Cloner"
@@ -349,7 +350,7 @@ NAV_CAPTIONS = {
 # One outline icon per page. The files are recoloured at render time, so a page
 # without an entry here would render a blank slot; tests/test_app_shell_parity.py
 # checks this map covers every real tab title and that each file exists.
-ICON_DIR = Path(__file__).resolve().parent / "resources" / "icons"
+ICON_DIR = paths.app_root() / "resources" / "icons"
 NAV_ICONS = {
     "Setup": "setup.svg",
     "Drawing Candidates": "candidates.svg",
@@ -649,8 +650,39 @@ class ModernMain(legacy.Main):
     # to avoid. tests/test_app_shell_parity.py enforces the rule.
 
 
+def selfcheck() -> int:
+    """Verify a packaged build without opening a window (``--selfcheck``).
+
+    A windowed build has no console, so a missing Qt plugin, a dropped data
+    folder or an unregistered font is otherwise only discovered by a user. The
+    build script runs this against the frozen executable before signing.
+    """
+    checks = {
+        "version": paths.version(),
+        "app_root": str(paths.app_root()),
+        "fonts": sorted(fonts.installed_families()),
+        "lisp_files": len(list((paths.app_root() / "lisp").glob("*.lsp"))),
+        "resources": (paths.app_root() / "resources").is_dir(),
+        "pdf_settings": (paths.app_root() / "revision" / "pdf_settings.json").is_file(),
+    }
+    ok = (
+        checks["resources"]
+        and checks["pdf_settings"]
+        and checks["lisp_files"] > 0
+        and fonts.FONT_FAMILY in checks["fonts"]
+    )
+    logging.getLogger("gni").info("selfcheck ok=%s %s", ok, checks)
+    return 0 if ok else 2
+
+
 def main() -> int:
+    logging_setup.setup()
+    logging_setup.install_excepthook()
     application = QApplication.instance() or QApplication(sys.argv)
+    # The bundled Plus Jakarta Sans must exist before the QSS below is applied.
+    fonts.install()
+    if "--selfcheck" in sys.argv:
+        return selfcheck()
     application.setApplicationName(APP_TITLE)
     application.setOrganizationName("Seatrium")
     application.setStyle("Fusion")
