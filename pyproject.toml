@@ -1,0 +1,16 @@
+[project]
+name = "gamma-nederwiek"
+version = "0.4C.22"
+description = "Gamma to Nederwiek revision migration (PySide6 desktop app driving AutoCAD Core Console)"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "PySide6>=6.7,<7",
+]
+
+[project.gui-scripts]
+gamma-nederwiek = "app_modern:main"
+
+[tool.uv]
+# The app has no build backend: it is run from source (`uv run python app.py`)
+# or frozen with packaging/GammaNederwiek.spec. Do not `uv build` it.
+package = false

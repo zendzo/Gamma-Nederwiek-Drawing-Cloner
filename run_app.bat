@@ -64,10 +64,13 @@ if errorlevel 1 (
 rem ------------------------------------------------------------
 rem 2. Create the local virtual environment with uv.
 rem ------------------------------------------------------------
+rem    The interpreter is pinned to 3.12: the code uses `X | None` annotations
+rem    (3.10+) and the packaged build is frozen with 3.12, so a stray system
+rem    Python 3.9 must not be used to create the environment.
 if not exist ".venv\Scripts\python.exe" (
     echo.
     echo [INFO] Creating .venv with uv...
-    "%UV_EXE%" venv ".venv"
+    "%UV_EXE%" venv --python 3.12 ".venv"
 
     if errorlevel 1 (
         echo [ERROR] Failed to create .venv.
@@ -77,23 +80,21 @@ if not exist ".venv\Scripts\python.exe" (
 )
 
 rem ------------------------------------------------------------
-rem 3. Activate the environment in this launcher session.
+rem 3. Use the environment's interpreter directly.
+rem    Deliberately no activate.bat + bare `python`: that picks up whatever
+rem    is first on PATH when activation fails silently, which is how a system
+rem    Python ended up running app.py without PySide6 installed.
 rem ------------------------------------------------------------
-if not exist ".venv\Scripts\activate.bat" (
-    echo [ERROR] Virtual environment activation script was not found.
+set "VENV_PY=%~dp0.venv\Scripts\python.exe"
+if not exist "%VENV_PY%" (
+    echo [ERROR] Virtual environment interpreter was not found:
+    echo         %VENV_PY%
     pause
     exit /b 1
 )
 
-call ".venv\Scripts\activate.bat"
-if errorlevel 1 (
-    echo [ERROR] Failed to activate .venv.
-    pause
-    exit /b 1
-)
-
-echo [OK] Active environment: %VIRTUAL_ENV%
-python --version
+echo [OK] Interpreter: %VENV_PY%
+"%VENV_PY%" --version
 if errorlevel 1 (
     echo [ERROR] Python is not available inside .venv.
     pause
@@ -112,7 +113,7 @@ if not exist "requirements.txt" (
 
 echo.
 echo [INFO] Synchronizing requirements with uv...
-"%UV_EXE%" pip install --python "%VIRTUAL_ENV%\Scripts\python.exe" -r "requirements.txt"
+"%UV_EXE%" pip install --python "%VENV_PY%" -r "requirements.txt"
 if errorlevel 1 (
     echo [ERROR] Dependency installation failed.
     pause
@@ -120,7 +121,7 @@ if errorlevel 1 (
 )
 
 rem ------------------------------------------------------------
-rem 5. Start the application using the activated environment.
+rem 5. Start the application with the environment's interpreter.
 rem    app_modern.py runs the same Main controller as app.py but adds the
 rem    sidebar shell; it falls back to app.py if the file is missing.
 rem ------------------------------------------------------------
@@ -135,7 +136,7 @@ if not exist "%APP_ENTRY%" (
 
 echo.
 echo [INFO] Starting GammaNederwiek (%APP_ENTRY%)...
-python "%APP_ENTRY%"
+"%VENV_PY%" "%APP_ENTRY%"
 set "APP_EXIT=%ERRORLEVEL%"
 
 if not "%APP_EXIT%"=="0" (
