@@ -15,8 +15,9 @@
       4. metadata    - VERSION file + build_info.json (git SHA, dirty flag)
       5. freeze      - PyInstaller onedir into a wiped dist\
       6. selfcheck   - run the built exe with --selfcheck before signing
-      7. sign        - signtool + Get-AuthenticodeSignature must report Valid
-      8. package     - README-FIRST.txt, SHA256SUMS.txt, versioned .zip
+      7. sign        - signtool + signtool verify must pass
+      8. AV scan     - Defender pre-scan; a flagged build is never zipped
+      9. package     - README-FIRST.txt, Verify-Build.ps1, SHA256SUMS.txt, .zip
 
 .PARAMETER Version
     Release label, e.g. 0.4C.18. Defaults to the contents of VERSION.
@@ -31,6 +32,10 @@
 .PARAMETER NoSign
     Produce an unsigned release zip (name gets an -unsigned suffix) for local
     testing only.
+
+.PARAMETER SkipScan
+    Skip the Windows Defender pre-scan of the finished folder. Only useful on a
+    build machine secured by another antivirus product.
 
 .PARAMETER Thumbprint
     Certificate thumbprint when more than one code-signing cert is installed.
@@ -49,6 +54,7 @@ param(
     [switch]$Fast,
     [switch]$SkipTests,
     [switch]$NoSign,
+    [switch]$SkipScan,
     [string]$Thumbprint = ""
 )
 
@@ -64,6 +70,7 @@ $ReleaseRoot = Join-Path $RepoRoot "release"
 $SpecPath = Join-Path $PSScriptRoot "GammaNederwiek.spec"
 $VersionInfoPath = Join-Path $PSScriptRoot "version_info.txt"
 $ReadmeSource = Join-Path $PSScriptRoot "README-FIRST.txt"
+$VerifySource = Join-Path $PSScriptRoot "Verify-Build.ps1"
 
 $PinnedPySide = "PySide6==6.12.0"
 $PinnedPyInstaller = "pyinstaller>=6.11,<7"
@@ -141,6 +148,28 @@ function Get-NumericVersion {
     }
     while ($numbers.Count -lt 4) { $numbers.Add(0) }
     return ($numbers.GetRange(0, 4))
+}
+
+function Find-MpCmdRun {
+    # MpCmdRun.exe instead of Start-MpScan: no PS module load, and the exit code
+    # (0 = clean, 2 = threat) is what the gate needs to decide.
+    $candidates = @(
+        (Join-Path $env:ProgramFiles "Windows Defender\MpCmdRun.exe"),
+        (Join-Path $env:ProgramData "Microsoft\Windows Defender\Platform\CurrentVersion\MpCmdRun.exe")
+    )
+    foreach ($candidate in $candidates) {
+        if ($candidate -and (Test-Path $candidate)) { return $candidate }
+    }
+    $platform = Join-Path $env:ProgramData "Microsoft\Windows Defender\Platform"
+    if (Test-Path $platform) {
+        $latest = Get-ChildItem -Path $platform -Directory -ErrorAction SilentlyContinue |
+            Sort-Object Name -Descending |
+            ForEach-Object { Join-Path $_.FullName "MpCmdRun.exe" } |
+            Where-Object { Test-Path $_ } |
+            Select-Object -First 1
+        if ($latest) { return $latest }
+    }
+    return $null
 }
 
 # ---------------------------------------------------------------- 1. preflight
@@ -312,7 +341,8 @@ Write-Ok "selfcheck passed (fonts, lisp, resources, revision settings)"
 Write-Step "Packaging"
 
 Copy-Item $ReadmeSource (Join-Path $AppDir "README-FIRST.txt") -Force
-Write-Ok "README-FIRST.txt copied"
+Copy-Item $VerifySource (Join-Path $AppDir "Verify-Build.ps1") -Force
+Write-Ok "README-FIRST.txt and Verify-Build.ps1 copied"
 
 $buildInfo = [ordered]@{
     version    = $Version
@@ -341,6 +371,32 @@ if (-not $Fast -and -not $NoSign) {
     Write-Ok "signature verified (publisher rule can be requested from IT)"
 } elseif (-not $Fast) {
     Write-Warn "UNSIGNED build (-NoSign) - do not distribute"
+}
+
+# ---------------------------------------------------------------- 8. AV pre-scan
+# A build that Defender flags must never reach the share, so scan the finished
+# folder before hashing/zipping. -DisableRemediation keeps the scanner from
+# deleting files out of the build it is inspecting.
+if (-not $Fast) {
+    Write-Step "Antivirus pre-scan"
+    if ($SkipScan) {
+        Write-Warn "skipped (-SkipScan) - the artifact has not been scanned"
+    } else {
+        $mpCmd = Find-MpCmdRun
+        if (-not $mpCmd) {
+            Write-Warn "MpCmdRun.exe not found (no Defender) - scan the folder before distributing"
+        } else {
+            & $mpCmd -Scan -ScanType 3 -File $AppDir -DisableRemediation | Out-Null
+            $scanCode = $LASTEXITCODE
+            if ($scanCode -eq 0) {
+                Write-Ok "Windows Defender found nothing"
+            } elseif ($scanCode -eq 2) {
+                Fail "Windows Defender reported a threat in the bundle (exit 2). Do not distribute this build."
+            } else {
+                Write-Warn "scan returned $scanCode - verify manually before distributing"
+            }
+        }
+    }
 }
 
 $exeHash = Get-Sha256 $ExePath

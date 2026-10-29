@@ -37,7 +37,7 @@ __all__ = [
 ]
 
 APP_DIR_NAME = "GammaNederwiek"
-DEFAULT_VERSION = "0.4C.17"
+DEFAULT_VERSION = "0.4C.18"
 _PROBE_NAME = ".gni_write_test"
 
 _cache: dict[str, Path] = {}

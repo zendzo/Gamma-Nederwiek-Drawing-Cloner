@@ -22,17 +22,31 @@ Portable build - nothing to install
      works but keeps its settings in
      %LOCALAPPDATA%\GammaNederwiek\config\settings.json instead.
 
-3. IF WINDOWS SHOWS "Windows protected your PC"
+3. IF WINDOWS WILL NOT START IT
 
-   That is the Mark-of-the-Web on a file that came from a download or e-mail,
-   not a virus report. Either:
+   Run the check that ships with this folder:
 
-   - copy the folder from the internal file share instead, or
-   - right-click GammaNederwiek.exe > Properties > tick "Unblock" > OK.
+       powershell -ExecutionPolicy Bypass -File .\Verify-Build.ps1
 
-   If your PC is managed and the app is blocked by policy, ask IT to allow the
-   publisher named in the signature instead of the file hash - the publisher
-   rule keeps working after every update.
+   It reports whether the copy is complete, whether Windows is blocking the
+   file, and whether the folder can be written. If it reports Mark-of-the-Web
+   (files that came from a zip or download), fix it with:
+
+       powershell -ExecutionPolicy Bypass -File .\Verify-Build.ps1 -Fix
+
+   Never distribute this folder as a ZIP. Files extracted from a zip inherit
+   "Mark-of-the-Web", and Windows then shows
+
+       "Microsoft Defender SmartScreen prevented an unrecognized app from
+        starting"
+
+   even when the app is perfectly fine. Copy the unzipped folder to the share
+   instead, or run Verify-Build.ps1 -Fix after extracting.
+
+   If the dialog has no "Run anyway" option, the machine is enforcing Smart App
+   Control or an AppLocker policy. No local setting can bypass that: ask IT to
+   allow the publisher named in the signature. IT should use a publisher rule,
+   not a file hash - the hash changes on every update.
 
 4. FIRST RUN
 
@@ -43,11 +57,12 @@ Portable build - nothing to install
 
 5. SOMETHING WENT WRONG?
 
-   Send the file logs\app.log together with build_info.json from this folder.
-   Those two files identify the exact build and contain the error trace.
+   Send logs\app.log and build_info.json from this folder. Those two files
+   identify the exact build and contain the error trace. If the app does not
+   start at all, send the output of Verify-Build.ps1 instead.
 
 6. FONTS AND LICENSING
 
    This build bundles the Plus Jakarta Sans font (SIL Open Font License 1.1,
-   see resources\fonts\OFL.txt inside _internal). The font is loaded for this
+   see _internal\resources\fonts\OFL.txt). The font is loaded for this
    application only - it is not installed into Windows.

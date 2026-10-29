@@ -55,6 +55,12 @@ class SourceRootTests(_IsolatedRoots):
         self.assertEqual(paths.version(), expected)
         self.assertNotEqual(paths.DEFAULT_VERSION, "", "a fallback label must exist")
 
+    def test_fallback_version_does_not_drift_from_the_version_file(self):
+        # DEFAULT_VERSION is only used when VERSION is missing from a bundle,
+        # but a stale value would print the wrong build in that case.
+        expected = (REPO_ROOT / "VERSION").read_text(encoding="utf-8").strip()
+        self.assertEqual(paths.DEFAULT_VERSION, expected)
+
 
 class FrozenRootTests(_IsolatedRoots):
     def setUp(self):
