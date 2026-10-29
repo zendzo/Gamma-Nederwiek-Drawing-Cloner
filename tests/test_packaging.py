@@ -1,4 +1,4 @@
-"""Packaging assets must stay wired to each other.
+﻿"""Packaging assets must stay wired to each other.
 
 The portable build fails in ways the Python suite cannot see - a spec that stops
 bundling ``lisp/``, a build script that stops shipping ``Verify-Build.ps1``, or a
@@ -6,6 +6,7 @@ PowerShell script that reaches for a cmdlet a domain PC hides. These are cheap
 static checks that catch exactly those regressions.
 """
 
+import re
 import unittest
 from pathlib import Path
 
@@ -89,6 +90,107 @@ class PowerShellRobustnessTests(unittest.TestCase):
         text = VERIFY.read_text(encoding="utf-8")
         self.assertIn("could not read GammaNederwiek.exe", text)
         self.assertIn("INCONCLUSIVE", text)
+
+    def test_motw_helper_always_returns_a_countable_array(self):
+        # PowerShell unrolls a returned collection, so `return ,@($list)` and
+        # `return ,@()` double-wrap it: the caller sees ONE empty element and a
+        # clean folder reports "1 file(s) carry Mark-of-the-Web". The helper
+        # must return its list behind a single comma, and every call site must
+        # pipe through ForEach-Object so @() yields the real file count.
+        text = VERIFY.read_text(encoding="utf-8")
+        code = self._code_without_comments(VERIFY)
+        self.assertIn("return ,([string[]]$marked)", code)
+        self.assertNotIn("return ,@($marked)", code)
+        self.assertNotIn("return ,@()", code)
+
+        calls = re.findall(r"@\(\s*Get-MotwFiles\s+\$\w+\s*\)", code)
+        self.assertEqual(
+            calls, [],
+            "wrap Get-MotwFiles call sites as @(Get-MotwFiles $x | ForEach-Object { $_ })",
+        )
+        self.assertEqual(code.count("@(Get-MotwFiles $Path | ForEach-Object { $_ })"), 2)
+        self.assertIn("function Get-MotwFiles", text)
+
+    def test_helper_avoids_the_ambient_files_variable(self):
+        # `$files` is an automatic [float] variable on some hosts; assigning an
+        # array to it yields "0" (count 1), so a clean folder reported a block.
+        text = VERIFY.read_text(encoding="utf-8")
+        self.assertNotRegex(text, r"\$files\s*=")
+        self.assertIn("$candidates", text)
+
+    def test_motw_detection_reads_the_stream_directly(self):
+        # Get-Item -Stream cannot distinguish "absent" from "present" (it reports
+        # absence via the error stream yet still returns an object), and
+        # File.OpenRead("file:Zone.Identifier") throws "format is not supported",
+        # so the check must go through FindFirstStreamW.
+        text = VERIFY.read_text(encoding="utf-8")
+        self.assertIn("function IsMarked", text)
+        self.assertIn("FindFirstStreamW", text)
+        self.assertIn("':Zone.Identifier*'", text)
+        self.assertNotIn('OpenRead($FilePath +', text)
+        self.assertNotIn("-Stream Zone.Identifier -ErrorAction Stop", text)
+
+    def test_predicate_helpers_avoid_verb_noun_names(self):
+        # PowerShell declares any function named verb-noun (e.g. Test-Foo) as a
+        # *filter*, so `if (Test-Foo $x)` evaluates to the filter object - always
+        # true - instead of calling it. Only functions whose result is used in a
+        # condition must avoid that shape (output helpers like Write-Pass are
+        # always called as bare statements, so they are fine).
+        text = VERIFY.read_text(encoding="utf-8")
+        names = re.findall(r"^function\s+([A-Za-z0-9_-]+)", text, flags=re.MULTILINE)
+        verby = [n for n in names if "-" in n]
+        self.assertTrue(verby, "expected at least one verb-noun helper")
+        for name in verby:
+            with self.subTest(function=name):
+                used_in_condition = re.search(
+                    r"(?m)^\s*(if|elseif|while)\s*\(\s*(?:-not\s+)?" + re.escape(name) + r"\b"
+                    r"|\|\s*" + re.escape(name) + r"\b",
+                    text,
+                )
+                self.assertIsNone(
+                    used_in_condition,
+                    f"{name} is verb-noun and used as a condition; rename it (IsMarked-style)",
+                )
+
+    def test_scripts_have_no_utf8_bom(self):
+        # A BOM turns the leading `#Requires -Version 3.0` into an invalid
+        # parameter name; Windows PowerShell then aborts the top-level script
+        # silently at that line and every check after it never runs.
+        for path in (BUILD, VERIFY):
+            with self.subTest(script=path.name):
+                head = path.read_bytes()[:3]
+                self.assertNotEqual(head, b"\xef\xbb\xbf", f"{path.name} starts with a UTF-8 BOM")
+
+    def test_scripts_do_not_concatenate_strings_as_command_arguments(self):
+        # Write-Info ("text" + $x) binds as ONE array argument, so the line prints
+        # blank and the value wraps onto the next line.
+        for path in (BUILD, VERIFY):
+            with self.subTest(script=path.name):
+                code = self._code_without_comments(path)
+                # A parenthesised *compound* expression is fine ("-" * 40);
+                # a parenthesised concatenation is the trap.
+                self.assertNotRegex(
+                    code,
+                    r"Write-(?:Info|Pass|Warn|Fail|Host)\s*\(\s*\"[^\"]*\"\s*\+",
+                    'use "text $($value)" instead of Write-* ("text" + $value)',
+                )
+
+    def test_log_folder_comparison_is_normalised(self):
+        # Comparing a logged `_internal` path with the folder by string prefix is
+        # true even when the log came from another machine; compare normalised
+        # full paths instead.
+        text = VERIFY.read_text(encoding="utf-8")
+        self.assertIn("function Test-SameFolder", text)
+        self.assertIn("Test-SameFolder $logged $internal", text)
+        # -Tail 1 is not the startup line: a newer selfcheck JSON line follows it,
+        # so the folder comparison must search for the startup entry instead.
+        code = self._code_without_comments(VERIFY)
+        self.assertNotIn("-Tail 1", code)
+        self.assertIn("startup version=", code)
+
+    def test_verify_warns_about_one_cloud_synced_folder(self):
+        text = VERIFY.read_text(encoding="utf-8")
+        self.assertIn("inside OneDrive", text)
 
 
 class ReadmeGuidanceTests(unittest.TestCase):

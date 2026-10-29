@@ -32,7 +32,7 @@
 .EXAMPLE
     .\Verify-Build.ps1 -Fix
 #>
-#Requires -Version 5.1
+#Requires -Version 3.0
 [CmdletBinding()]
 param(
     [string]$Path = "",
@@ -108,16 +108,120 @@ function Get-Sha256 {
 
 function Get-MotwFiles {
     param([string]$Folder)
-    $blocked = New-Object System.Collections.Generic.List[string]
-    foreach ($file in Get-ChildItem -Path $Folder -Recurse -File -ErrorAction SilentlyContinue) {
-        try {
-            $stream = Get-Item -Path $file.FullName -Stream Zone.Identifier -ErrorAction Stop
-            if ($stream) { $blocked.Add($file.FullName) }
-        } catch {
-            # no alternate data stream: the file is not marked
-        }
+
+    # Do NOT name this `$files`: AppsAndFeatures-style hosts (and Windows
+    # PowerShell in some configurations) expose a [float] automatic variable of
+    # that name, so an environment array silently becomes the string "0".
+    $candidates = @()
+    try {
+        $candidates = @(Get-ChildItem -Path $Folder -Recurse -File -ErrorAction SilentlyContinue)
+    } catch {
+        # `-File` needs PowerShell 3; fall back for older hosts.
+        $candidates = @(Get-ChildItem -Path $Folder -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { -not $_.PSIsContainer })
     }
-    return $blocked
+    # Always return an array: Windows PowerShell drops .Count from a single
+    # unrolled result, which made a clean folder report "1 file".
+    $marked = New-Object System.Collections.Generic.List[string]
+    foreach ($item in $candidates) {
+        if (IsMarked $item.FullName) { $marked.Add($item.FullName) }
+    }
+    # Return the list as one [string[]]. PowerShell unrolls the returned
+    # collection and @() re-wraps it as a single element, which made a clean
+    # folder report "1 file(s) carry Mark-of-the-Web" (the element was an empty
+    # string). `return ,@()` is the same double wrap - never use it. A
+    # [string[]] enumerates correctly through the callers' ForEach-Object for
+    # 0, 1 and many items.
+    return ,([string[]]$marked)
+}
+
+function IsMarked {
+    param([string]$FilePath)
+
+    # Deliberately NOT named Test-MotwFile: a verb-noun name declared without
+    # `filter` is still discovered as a filter, and `Test-MotwFile` inside an
+    # `if` would then evaluate to the filter object (always true) instead of
+    # the file's state - which reported every folder as fully blocked.
+    if (-not $FilePath) { return $false }
+    $names = Get-StreamNames $FilePath
+    if ($null -ne $names) {
+        # Entries are named ":Zone.Identifier:$DATA", hence the wildcard.
+        $hit = @($names | Where-Object { $_ -like ':Zone.Identifier*' })
+        return ($hit.Count -gt 0)
+    }
+
+    # Fallback only if the API above is unavailable: -ErrorAction SilentlyContinue
+    # matters, because `Get-Item -Stream` reports a *missing* stream through the
+    # error stream and a plain try/catch would turn that into "marked".
+    $found = Get-Item -Path $FilePath -Stream Zone.Identifier -ErrorAction SilentlyContinue
+    return ($null -ne $found)
+}
+
+function Get-StreamNames {
+    param([string]$FilePath)
+
+    # Neither File.OpenRead("path:Stream") nor Get-Item -Stream is reliable:
+    # .NET rejects the ':' in the path ("format is not supported"), and
+    # Get-Item reports a missing stream through the error stream while still
+    # returning an object, so a caller cannot tell "absent" from "present".
+    # FindFirstStreamW answers exactly the question asked and works for every
+    # path. Returns $null only when the API itself cannot be used.
+    $sig = @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class GniStreams
+{
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    public struct FIND_STREAM_DATA
+    {
+        public long StreamSize;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 296)]
+        public string StreamName;
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr FindFirstStreamW(string fileName, int infoLevel, out FIND_STREAM_DATA data, int flags);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool FindNextStreamW(IntPtr handle, out FIND_STREAM_DATA data);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool FindClose(IntPtr handle);
+
+    public static string[] Names(string fileName)
+    {
+        FIND_STREAM_DATA data;
+        IntPtr handle = FindFirstStreamW(fileName, 0, out data, 0);
+        if (handle == IntPtr.Zero || handle == new IntPtr(-1)) { return new string[0]; }
+        var names = new System.Collections.Generic.List<string>();
+        names.Add(data.StreamName);
+        while (FindNextStreamW(handle, out data)) { names.Add(data.StreamName); }
+        FindClose(handle);
+        return names.ToArray();
+    }
+}
+'@
+    if (-not ("GniStreams" -as [type])) {
+        try { Add-Type -TypeDefinition $sig -Language CSharp -ErrorAction Stop } catch { return $null }
+    }
+    try {
+        # Stream entries are named ":Name:$DATA", so compare the ':$DATA' part too.
+        return [GniStreams]::Names($FilePath)
+    } catch {
+        return $null
+    }
+}
+
+function Test-SameFolder {
+    param([string]$Left, [string]$Right)
+    try {
+        $a = [System.IO.Path]::GetFullPath($Left).TrimEnd('\')
+        $b = [System.IO.Path]::GetFullPath($Right).TrimEnd('\')
+        return [string]::Equals($a, $b, [System.StringComparison]::OrdinalIgnoreCase)
+    } catch {
+        return $false
+    }
 }
 
 if (-not $Path) { $Path = $PSScriptRoot }
@@ -132,6 +236,7 @@ $internal = Join-Path $Path "_internal"
 Write-Host ""
 Write-Host "GammaNederwiek - portable copy check" -ForegroundColor White
 Write-Host "Folder: $Path"
+Write-Host "PowerShell: $($PSVersionTable.PSVersion)"
 
 # ---------------------------------------------------------------- 1. completeness
 Write-Head "1. Copy completeness"
@@ -177,8 +282,8 @@ if ((Test-Path $exePath) -and (Test-Path $sumsPath)) {
         # not evidence of a bad copy, so it must not be reported as a mismatch.
         $inconclusive = $true
         Write-Warn "could not read GammaNederwiek.exe (locked by antivirus or still running)"
-        $running = Get-Process -Name "GammaNederwiek" -ErrorAction SilentlyContinue
-        if ($running) {
+        $running = @(Get-Process -Name "GammaNederwiek" -ErrorAction SilentlyContinue)
+        if ($running.Count -gt 0) {
             Write-Info "the application is already running - close it and run this check again"
         } else {
             Write-Info "wait a few seconds and run this check again"
@@ -198,13 +303,16 @@ if ((Test-Path $exePath) -and (Test-Path $sumsPath)) {
 Write-Head "2. Windows blocking"
 
 if (Test-Path $exePath) {
-    $blocked = Get-MotwFiles $Path
+    # Enumerate with ForEach-Object: the helper returns its list behind one
+    # comma (see Get-MotwFiles), and @(...) alone would keep the list itself as
+    # a single element. Piping flattens it, so .Count is the real file count.
+    $blocked = @(Get-MotwFiles $Path | ForEach-Object { $_ })
     if ($blocked.Count -eq 0) {
         Write-Pass "no Mark-of-the-Web on any file"
     } elseif ($Fix) {
         Write-Info "$($blocked.Count) file(s) carry Mark-of-the-Web - removing it now"
         foreach ($file in $blocked) { Unblock-File -Path $file -ErrorAction SilentlyContinue }
-        $remaining = Get-MotwFiles $Path
+        $remaining = @(Get-MotwFiles $Path | ForEach-Object { $_ })
         if ($remaining.Count -eq 0) {
             # No warning is recorded: this run fixed the block.
             Write-Pass "Mark-of-the-Web removed from every file"
@@ -213,8 +321,11 @@ if (Test-Path $exePath) {
         }
     } else {
         Write-Warn "$($blocked.Count) file(s) carry Mark-of-the-Web (came from a zip/download)"
-        Write-Info ("first: " + $blocked[0])
-        Write-Info "fix it with:  .\Verify-Build.ps1 -Fix"
+        $shown = @($blocked | Select-Object -First 3)
+        foreach ($markedFile in $shown) {
+            Write-Info "  marked: $([System.IO.Path]::GetFileName($markedFile))"
+        }
+        Write-Info "  remove it with:  .\Verify-Build.ps1 -Fix"
     }
 }
 
@@ -273,15 +384,32 @@ if ($Path -like "\\*") {
     Write-Warn "running from a network path - copy the folder to a local disk first"
 }
 
+# OneDrive / Dropbox keep a placeholder file until synced; a partially synced
+# folder is a far more common cause of "it will not open" than anything else.
+if ($Path -match '\\OneDrive') {
+    Write-Warn "this folder is inside OneDrive - files may still be syncing; copy it to C:\Apps first"
+}
+
 $logPath = Join-Path $Path "logs\app.log"
 if (Test-Path $logPath) {
-    $lastLine = Get-Content $logPath -Tail 1 -ErrorAction SilentlyContinue
-    Write-Info "last log line: $lastLine"
-    if ($lastLine -match "app_root=(.+?)\s") {
-        $logged = $Matches[1]
-        if ($logged -and -not ($logged -like "$Path*")) {
-            Write-Info "this log came from another machine/folder - the app has not run here yet"
+    # The `startup version=...` line is the one that records app_root/data_root;
+    # the newest line may be a selfcheck JSON entry, so searching for -Tail 1
+    # reported "came from another machine" on a log written right here.
+    $startupLine = Get-Content $logPath -ErrorAction SilentlyContinue |
+        Where-Object { $_ -match "startup version=" } |
+        Select-Object -Last 1
+    if ($startupLine) {
+        Write-Info "last startup: $($startupLine -replace '^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \w+\s+\w+:\s*', '')"
+        if ($startupLine -match "app_root=(.+?)\s+data_root=") {
+            $logged = $Matches[1]
+            if ($logged -and -not (Test-SameFolder $logged $internal)) {
+                Write-Info "this log came from another machine/folder - the app has not run here yet"
+            } else {
+                Write-Pass "the application has started in this folder"
+            }
         }
+    } else {
+        Write-Info "no startup entry in logs\app.log yet - the app has not started here"
     }
 } else {
     Write-Info "no logs\app.log yet: the app has not started in this folder"
