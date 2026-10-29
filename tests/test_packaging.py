@@ -76,6 +76,20 @@ class PowerShellRobustnessTests(unittest.TestCase):
         self.assertIn("Unblock-File", text)
         self.assertIn("VerifiedAndReputablePolicyState", text)
 
+    def test_hash_helpers_survive_a_locked_executable(self):
+        # A freshly unblocked exe is often held by Defender's real-time scan; a
+        # plain File.OpenRead fails there with UnauthorizedAccessException.
+        for path in (BUILD, VERIFY):
+            with self.subTest(script=path.name):
+                code = self._code_without_comments(path)
+                self.assertIn("FileShare", code)
+                self.assertIn("Start-Sleep", code, "the read must retry, not fail once")
+
+    def test_verify_reports_a_lock_as_a_warning_not_a_mismatch(self):
+        text = VERIFY.read_text(encoding="utf-8")
+        self.assertIn("could not read GammaNederwiek.exe", text)
+        self.assertIn("INCONCLUSIVE", text)
+
 
 class ReadmeGuidanceTests(unittest.TestCase):
     def test_readme_warns_about_zip_mark_of_the_web(self):

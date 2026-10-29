@@ -16,6 +16,9 @@
     can have a PSModulePath that points Windows PowerShell 5.1 at the PowerShell
     7 module tree, where those cmdlets do not auto-load.
 
+    Exit codes: 0 = runnable, 1 = blocking problem, 2 = could not read the
+    executable (locked by antivirus or by a running instance) - run it again.
+
 .PARAMETER Path
     Folder to check. Defaults to the folder holding this script.
 
@@ -40,6 +43,7 @@ $ErrorActionPreference = "Continue"
 
 $problems = New-Object System.Collections.Generic.List[string]
 $warnings = New-Object System.Collections.Generic.List[string]
+$inconclusive = $false
 
 function Write-Head {
     param([string]$Text)
@@ -71,16 +75,35 @@ function Write-Info {
 }
 
 function Get-Sha256 {
-    param([string]$FilePath)
-    $sha = [System.Security.Cryptography.SHA256]::Create()
-    $stream = [System.IO.File]::OpenRead($FilePath)
-    try {
-        $bytes = $sha.ComputeHash($stream)
-    } finally {
-        $stream.Dispose()
-        $sha.Dispose()
+    param([string]$FilePath, [int]$Attempts = 3)
+
+    # A freshly unblocked executable is often held by Defender's real-time scan,
+    # and a running instance keeps its image mapped. File.OpenRead asks for
+    # FileShare.Read only, which fails with UnauthorizedAccessException in both
+    # cases; opening with a permissive share mode and retrying reads through it.
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        $sha = $null
+        $stream = $null
+        try {
+            $share = [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete
+            $stream = [System.IO.File]::Open(
+                $FilePath,
+                [System.IO.FileMode]::Open,
+                [System.IO.FileAccess]::Read,
+                $share
+            )
+            $sha = [System.Security.Cryptography.SHA256]::Create()
+            $bytes = $sha.ComputeHash($stream)
+            return (([System.BitConverter]::ToString($bytes)) -replace '-', '').ToLowerInvariant()
+        } catch {
+            if ($attempt -eq $Attempts) { return $null }
+            Start-Sleep -Milliseconds 400
+        } finally {
+            if ($null -ne $stream) { $stream.Dispose() }
+            if ($null -ne $sha) { $sha.Dispose() }
+        }
     }
-    return (([System.BitConverter]::ToString($bytes)) -replace '-', '').ToLowerInvariant()
+    return $null
 }
 
 function Get-MotwFiles {
@@ -149,13 +172,24 @@ $sumsPath = Join-Path $Path "SHA256SUMS.txt"
 if ((Test-Path $exePath) -and (Test-Path $sumsPath)) {
     $expected = ((Get-Content $sumsPath -TotalCount 1) -split '\s+')[0]
     $actual = Get-Sha256 $exePath
-    if ($expected -and ($expected -eq $actual)) {
+    if (-not $actual) {
+        # Could not read it: locked by antivirus or by a running instance. That is
+        # not evidence of a bad copy, so it must not be reported as a mismatch.
+        $inconclusive = $true
+        Write-Warn "could not read GammaNederwiek.exe (locked by antivirus or still running)"
+        $running = Get-Process -Name "GammaNederwiek" -ErrorAction SilentlyContinue
+        if ($running) {
+            Write-Info "the application is already running - close it and run this check again"
+        } else {
+            Write-Info "wait a few seconds and run this check again"
+        }
+    } elseif ($expected -and ($expected -eq $actual)) {
         Write-Pass "executable hash matches SHA256SUMS.txt"
+        Write-Info "exe sha256: $actual"
     } else {
         Write-Fail "executable hash does not match SHA256SUMS.txt (expected $expected, got $actual)"
         Write-Info "a mismatch means a partial copy, a different build, or antivirus modification"
     }
-    Write-Info "exe sha256: $actual"
 } elseif (Test-Path $exePath) {
     Write-Warn "SHA256SUMS.txt missing - cannot prove the copy is intact"
 }
@@ -256,6 +290,12 @@ if (Test-Path $logPath) {
 # ---------------------------------------------------------------- verdict
 Write-Host ""
 if ($problems.Count -eq 0) {
+    if ($inconclusive) {
+        Write-Host "RESULT: INCONCLUSIVE - the executable could not be read this time." -ForegroundColor Yellow
+        Write-Host "Close the application (or wait for the antivirus scan to finish) and run this check again." -ForegroundColor Yellow
+        Write-Host ""
+        exit 2
+    }
     if ($warnings.Count -eq 0) {
         Write-Host "RESULT: READY - this copy is complete and unblocked." -ForegroundColor Green
     } else {

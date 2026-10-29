@@ -128,16 +128,31 @@ function Get-Sha256 {
     # Deliberately not Get-FileHash: a domain PC can have a broken PSModulePath
     # (Windows PowerShell 5.1 picking up the PowerShell 7 module tree), where
     # Microsoft.PowerShell.Utility does not auto-load and the cmdlet is missing.
-    param([string]$Path)
-    $sha = [System.Security.Cryptography.SHA256]::Create()
-    $stream = [System.IO.File]::OpenRead($Path)
-    try {
-        $bytes = $sha.ComputeHash($stream)
-    } finally {
-        $stream.Dispose()
-        $sha.Dispose()
+    # The permissive share mode also reads a file antivirus is holding open.
+    param([string]$Path, [int]$Attempts = 3)
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        $sha = $null
+        $stream = $null
+        try {
+            $share = [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete
+            $stream = [System.IO.File]::Open(
+                $Path,
+                [System.IO.FileMode]::Open,
+                [System.IO.FileAccess]::Read,
+                $share
+            )
+            $sha = [System.Security.Cryptography.SHA256]::Create()
+            $bytes = $sha.ComputeHash($stream)
+            return (([System.BitConverter]::ToString($bytes)) -replace '-', '').ToLowerInvariant()
+        } catch {
+            if ($attempt -eq $Attempts) { return $null }
+            Start-Sleep -Milliseconds 400
+        } finally {
+            if ($null -ne $stream) { $stream.Dispose() }
+            if ($null -ne $sha) { $sha.Dispose() }
+        }
     }
-    return (([System.BitConverter]::ToString($bytes)) -replace '-', '').ToLowerInvariant()
+    return $null
 }
 
 function Get-NumericVersion {
@@ -400,6 +415,7 @@ if (-not $Fast) {
 }
 
 $exeHash = Get-Sha256 $ExePath
+if (-not $exeHash) { Fail "Could not hash $ExePath (file locked by antivirus?)." }
 $sumsPath = Join-Path $AppDir "SHA256SUMS.txt"
 Set-Content -Path $sumsPath -Value "$exeHash  GammaNederwiek.exe" -Encoding ASCII
 Write-Ok "sha256: $exeHash"
@@ -429,6 +445,7 @@ if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
 )
 $zipMb = [math]::Round(((Get-Item $zipPath).Length / 1MB), 1)
 $zipHash = Get-Sha256 $zipPath
+if (-not $zipHash) { $zipHash = "(could not read the archive)" }
 Write-Ok "archive: $zipPath ($zipMb MB)"
 
 Write-Step "Summary"
