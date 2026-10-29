@@ -332,7 +332,7 @@ PAGE_DESCRIPTIONS = {
     "Supporting File Clone": "Review and clone part lists, NC1 files, DXF files, and related assets.",
     "Title Block Discovery": "Inspect title-block entities discovered from each DWG.",
     "Revision Plan": "Review proposed revision actions before controlled writing.",
-    "Reports": "Open pipeline reports and verify the publish-gate evidence.",
+    "Reports": "Read pipeline KPIs, stage health, blocking issues, and evidence.",
 }
 
 # Sidebar captions, keyed by the real tab titles from app.py::Main.__init__.

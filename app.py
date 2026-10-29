@@ -12,6 +12,7 @@ from revision.atomic_publisher import AtomicPublisher,AtomicPublishError
 from revision.pdf_worker import PdfPublishWorker
 from runtime.production_workers import DiscoveryWorker, ProductionPlanWorker
 from runtime.background_controller import BackgroundOperationController
+from reporting.dashboard import ReportDashboard
 BASE=Path(__file__).resolve().parent;CFG=BASE/'config'/'settings.json'
 PIPELINE=(('scan','Scan source'),('destination','Build destination'),('clone','Clone supporting files'),('discovery','Discover title blocks'),('plan','Build revision plan'),('writer','Stable external writer'),('validator','Reopen validator'),('dryrun','Atomic publish dry run'),('publish','Atomic publisher'),('pdf','Publish PDFs'))
 STAGE_REPORTS={'destination':'destination_manifest.json','clone':'supporting_file_clone_report.json','discovery':'title_block_discovery_report.json','plan':'revision_pilot_write_plan.json','writer':'stable_external_writer_report.json','validator':'reopen_validation_report.json','dryrun':'atomic_publish_dry_run_report.json','publish':'atomic_publish_report.json','pdf':'pdf_publish_report.json'}
@@ -39,8 +40,8 @@ class Main(QMainWindow):
   ws=QWidget();tabs.addTab(ws,'Supporting File Clone');sl=QVBoxLayout(ws);self.stbl=self.table(['Select','Role','Extension','Source Path','Destination','Status','Action','Backup','Error']);sl.addWidget(self.stbl);sbar=QHBoxLayout();self.cloneb=QPushButton('Clone Selected Supporting Files');self.cloneb.clicked.connect(self.clone_supporting);self.policy=QComboBox();self.policy.addItems(['BACKUP_OVERWRITE','SKIP_DIFFERENT','KEEP_BOTH']);self.retryb=QPushButton('Retry Failed Copies');self.retryb.clicked.connect(self.retry_supporting);self.openb=QPushButton('Open Supporting Destination');self.openb.clicked.connect(self.open_supporting_destination);sbar.addWidget(self.cloneb);sbar.addWidget(QLabel('Collision:'));sbar.addWidget(self.policy);sbar.addWidget(self.retryb);sbar.addWidget(self.openb);sbar.addStretch();sl.addLayout(sbar);self.support_results=[]
   wd=QWidget();tabs.addTab(wd,'Title Block Discovery');dl=QVBoxLayout(wd);self.dtbl=self.table(['Identity','Type','Source','Entity','Handle','Layer','Block','Tag','Value','Suggested Field','Confidence','Score','Evidence','Proposed A','Proposed 00','Warning']);dl.addWidget(self.dtbl);self.discovery_results=[]
   wp=QWidget();tabs.addTab(wp,'Revision Plan');pl=QVBoxLayout(wp);self.ptbl=self.table(['Identity','Type','Status','Primary Geometry','A Source Policy','Migration Date','A Date','00 Date','Actions','Warnings','Errors']);pl.addWidget(self.ptbl);self.revision_plans=[]
-  w3=QWidget();tabs.addTab(w3,'Reports');lll=QVBoxLayout(w3);self.rtbl=self.table(['Report','Modified','Size (KB)']);self.rtbl.cellDoubleClicked.connect(self.open_report);lll.addWidget(self.rtbl);self._report_paths=[]
-  rbar=QHBoxLayout();self.refreshb=QPushButton('Refresh Reports');self.refreshb.clicked.connect(self.refresh_reports);self.folderb=QPushButton('Open Reports Folder');self.folderb.clicked.connect(self.open_reports_folder);rbar.addWidget(self.refreshb);rbar.addWidget(self.folderb);rbar.addStretch();lll.addLayout(rbar);note=QLabel('Reports are the pipeline handoff files in <destination>/<bundle>/_GNI_REPORTS. Double-click a row to open it. Revision-cloud deletion and DXF content migration are not implemented yet.');note.setWordWrap(True);lll.addWidget(note);tabs.currentChanged.connect(self._tab_changed);self.refresh_pipeline()
+  w3=QWidget();tabs.addTab(w3,'Reports');lll=QVBoxLayout(w3);self.rtbl=self.table(['Report','Modified','Size (KB)']);self.rtbl.cellDoubleClicked.connect(self.open_report);self._report_paths=[]
+  self.refreshb=QPushButton('Refresh Reports');self.refreshb.clicked.connect(self.refresh_reports);self.folderb=QPushButton('Open Reports Folder');self.folderb.clicked.connect(self.open_reports_folder);self.dashboard=ReportDashboard(self.rtbl,(self.refreshb,self.folderb),'Reports are the pipeline handoff files in <destination>/<bundle>/_GNI_REPORTS. Double-click a row to open it. Revision-cloud deletion and DXF content migration are not implemented yet.');self.dashboard.stageActivated.connect(self._open_path);lll.addWidget(self.dashboard,1);tabs.currentChanged.connect(self._tab_changed);self.refresh_pipeline()
  def table(self,h):t=QTableWidget(0,len(h));t.setHorizontalHeaderLabels(h);t.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents);t.horizontalHeader().setStretchLastSection(True);return t
  def _sync_advanced_buttons(self,on):
   for button in self.stage_buttons.values():button.setEnabled(bool(on) and not self._busy)
@@ -233,6 +234,7 @@ class Main(QMainWindow):
  def reports_root(self):return Path(self.dst.text())/self.bundle.text()/'_GNI_REPORTS'
  def refresh_reports(self):
   root=self.reports_root();self._report_paths=[];self.rtbl.setRowCount(0)
+  if hasattr(self,'dashboard'):self.dashboard.refresh(root)
   if not root.is_dir():self.status.setText('Reports: no _GNI_REPORTS folder yet for this bundle');return
   files=sorted((p for p in root.iterdir() if p.is_file()),key=lambda p:p.stat().st_mtime,reverse=True);stamp=__import__('datetime').datetime.fromtimestamp;self.rtbl.setRowCount(len(files))
   for row,path in enumerate(files):
