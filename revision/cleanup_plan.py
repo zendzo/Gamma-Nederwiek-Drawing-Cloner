@@ -108,6 +108,17 @@ class NoDonorRevisionCleanupPlanBuilder(RevisionWritePlanBuilder):
             (action.output_revision, action.handle, action.target_field)
             for action in plan.actions
         }
+        # Handles an output already keeps or writes a real value into. A cleanup
+        # action must never clear those: with a single-row revision table the A
+        # row reuses the 00 row's cells, and an empty write outranks the "A"
+        # value write when the writer groups actions per handle (rank 400 vs
+        # 300), which blanked the A deliverable's whole revision row.
+        protected = {
+            (action.output_revision, action.handle)
+            for action in plan.actions
+            if action.handle
+            and (action.action != "WRITE" or str(action.new_value).strip())
+        }
         cleanup_count = {"A": 0, "00": 0}
 
         retained_revisions = {
@@ -134,6 +145,8 @@ class NoDonorRevisionCleanupPlanBuilder(RevisionWritePlanBuilder):
                     )
                     key = (output_revision, handle, target_field)
                     if key in existing_keys:
+                        continue
+                    if (output_revision, handle) in protected:
                         continue
                     plan.actions.append(
                         self._cleanup_action(

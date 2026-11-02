@@ -7,18 +7,27 @@ import csv
 import json
 import os
 import shutil
+import struct
 import subprocess
 import tempfile
 import time
 import uuid
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from typing import Dict, List
 
+from runtime.batching import clamp_batch_size, run_batched
+from runtime.atomic_io import atomic_replace
 from runtime.console_text import decode_console
 from runtime.hashing import sha256_file
 from runtime.process_tracking import run_console
 
-STABLE_WRITER_VERSION = "0.4C.6-parallel-writer"
+# 0.4C.26: one Core Console process writes a whole batch of plans (A and 00 per
+# plan) instead of one process per output. Startup is ~4.5 s and a write is
+# 0.5-2 s, so batching is the difference between hours and minutes at 700 files.
+# 0.4C.32: before QSAVE the writer normalizes reference rasters. Older Gamma
+# drawings stored a 922x260 Tennet IMAGEDEF while the packaged PNG is 1136x305;
+# AutoCAD renders at the file size, so the logo grew ~23% and overlapped its
+# neighbour. The writer sees the original size (its working copy has no PNGs).
+STABLE_WRITER_VERSION = "0.4C.32-logo-raster-scale"
 
 
 class StableWriterError(RuntimeError):
@@ -62,6 +71,9 @@ class StableExternalActionWriter:
     SUCCESS_MARKER = "GNI_STABLE_EXTERNAL_WRITER_OK:"
     FAILURE_MARKER = "GNI_STABLE_EXTERNAL_WRITER_FAILED:"
     EXIT_MARKER = "GNI_STABLE_EXTERNAL_WRITER_EXIT_READY"
+    # Reference rasters whose file pixel size may differ from the IMAGEDEF
+    # stored in an older drawing. See STABLE_WRITER_VERSION 0.4C.32.
+    RASTER_ASSETS = ("SEAtrium_Ge_.PNG", "Tennet LogO New.PNG")
 
     def __init__(
         self,
@@ -127,7 +139,7 @@ class StableExternalActionWriter:
         if temporary.stat().st_size != source.stat().st_size:
             temporary.unlink(missing_ok=True)
             raise OSError("Copy size mismatch")
-        os.replace(temporary, destination)
+        atomic_replace(temporary, destination)
         return destination
 
     # Shared hasher: see runtime/hashing.py.
@@ -139,6 +151,38 @@ class StableExternalActionWriter:
     @staticmethod
     def _scr_path(path):
         return str(Path(path).resolve()).replace("\\", "/").replace('"', '\\"')
+
+    @staticmethod
+    def _png_size(path):
+        """Pixel size from a PNG IHDR chunk, or None when unreadable."""
+        try:
+            data = Path(path).read_bytes()
+        except OSError:
+            return None
+        if data[:8] == b"\x89PNG\r\n\x1a\n" and data[12:16] == b"IHDR":
+            return struct.unpack(">II", data[16:24])
+        return None
+
+    def _raster_map_rows(self, drawing_type):
+        """filename TAB width TAB height for this type's reference PNGs.
+
+        The writer's working copy has no PNG beside it, so AutoLISP still sees
+        the drawing's *original* IMAGEDEF size. These rows tell it what the
+        packaged file really is, letting it rescale without guessing.
+        """
+        app = getattr(self, "application_root", None)
+        if app is None:
+            return []
+        folder = (
+            Path(app) / "resources" / "reference_images"
+            / str(drawing_type).strip().upper()
+        )
+        rows = []
+        for name in self.RASTER_ASSETS:
+            size = self._png_size(folder / name)
+            if size:
+                rows.append(f"{name}\t{size[0]}\t{size[1]}")
+        return rows
 
     @staticmethod
     def _clean_field(value):
@@ -338,15 +382,41 @@ class StableExternalActionWriter:
             writer.writeheader()
             writer.writerows(actions)
 
-    def _run_output(self, plan, mode, job):
-        started = time.time()
+    @staticmethod
+    def _safe(value):
+        return "".join(
+            char if char.isalnum() or char in "._-" else "_" for char in str(value)
+        )[:80]
+
+    def _new_job(self, name):
+        """Fresh job folder; a name collision must never reuse a stale one."""
+        for _ in range(64):
+            job = self.job_root / (
+                datetime.now().strftime("%Y%m%d_%H%M%S_")
+                + self._safe(name)
+                + "_"
+                + uuid.uuid4().hex[:8]
+            )
+            try:
+                job.mkdir(parents=True, exist_ok=False)
+                return job
+            except FileExistsError:
+                continue
+        raise OSError(f"Could not allocate a stable-writer job folder for {name}")
+
+    def _stage_output(self, plan, mode, job):
+        """Copy the pristine source and write this output's action TSV.
+
+        Staging is per (plan, mode) on purpose: the A and 00 outputs are written
+        from the same source but must never share a working DWG, or one output's
+        QSAVE would leak into the other.
+        """
         identity = plan["identity"]
         source = Path(plan["primary_geometry"]).resolve()
-        working = job / f"{identity}_{mode}.dwg"
+        working = job / f"{self._safe(identity)}_{mode}.dwg"
         action_file = job / f"{mode}_actions.tsv"
         result_tsv = job / f"{mode}_result.tsv"
         log = job / f"{mode}_stable_writer.log"
-        script = job / f"{mode}_stable_writer.scr"
         output = StableOutput(
             identity,
             plan["drawing_type"],
@@ -359,57 +429,83 @@ class StableExternalActionWriter:
             str(result_tsv),
             str(log),
         )
+        actions = self._prepare_actions(plan, mode)
+        output.actions_requested = len(actions)
+        self._atomic_copy(source, working)
+        self._write_action_file(action_file, actions)
+        rows = self._raster_map_rows(plan["drawing_type"])
+        if rows:
+            (job / "raster_map.tsv").write_text(
+                "\n".join(rows) + "\n", encoding="ascii"
+            )
+        return output
+
+    def _script_header(self):
+        return [
+            '(setvar "FILEDIA" 0)',
+            '(setvar "CMDDIA" 0)',
+            '(if (getvar "REPORTERROR") (setvar "REPORTERROR" 0))',
+            f'(setvar "TRUSTEDPATHS" "{self._scr_path(self.runtime_root)}")',
+            f'(load "{self._scr_path(self.runtime_lisp)}")',
+        ]
+
+    def _writer_call(self, output):
+        map_path = Path(output.job_folder) / "raster_map.tsv"
+        map_arg = f'"{self._scr_path(map_path)}"' if map_path.is_file() else '""'
+        return (
+            f'(GNI:RUN-EXTERNAL-WRITER "{output.output_revision}" '
+            f'"{self._scr_path(output.action_file)}" '
+            f'"{self._scr_path(output.result_tsv)}" '
+            f'"{self.target_layer}" {self.target_color} {map_arg})'
+        )
+
+    @staticmethod
+    def _dirty_guard():
+        """Save a modified document so the next `_.OPEN` cannot prompt.
+
+        A failed action set leaves the working copy dirty. `_.OPEN` on a dirty
+        drawing asks "Do you want to save changes?", and in a `.scr` that
+        question swallows the rest of the batch. The working copy is a throwaway
+        under %TEMP% and its result TSV already records the failure, so saving it
+        is safe and keeps the remaining drawings of the batch alive.
+        """
+        return (
+            '(if (/= 0 (getvar "DBMOD")) '
+            '(progn (princ "\\nGNI_BATCH_DIRTY_DOCUMENT_SAVED") '
+            '(vl-catch-all-apply (quote command-s) (list "_.QSAVE"))))'
+        )
+
+    @staticmethod
+    def _open_line(path):
+        """Open the next drawing from LISP so spaces in the path survive.
+
+        A ``.scr`` feeds one line per prompt, so a bare ``_.OPEN C:/a b/x.dwg``
+        is truncated at the space and Core Console then waits for the rest of
+        the name until the batch timeout. ``command-s`` takes the path as a
+        single string (the discovery batch uses the same call).
+        """
+        target = str(Path(path).resolve()).replace("\\", "/").replace('"', '\\"')
+        return ('(vl-catch-all-apply (quote (lambda () '
+                '(command-s "_.OPEN" "' + target + '"))))')
+
+    def _verify_output(self, output, combined, exit_code, started, strict):
+        """Decide one output's status from *its own* artefacts.
+
+        Console output is shared by every drawing in the process, so in a batch
+        only the per-output result TSV can prove that this output was written.
+        That is the same rule the batched discovery stage uses for its TSV.
+        """
+        result_tsv = Path(output.result_tsv)
+        working = Path(output.working_dwg)
+        output.exit_code = exit_code
         try:
-            self._atomic_copy(source, working)
-            actions = self._prepare_actions(plan, mode)
-            output.actions_requested = len(actions)
-            self._write_action_file(action_file, actions)
-
-            lines = [
-                '(setvar "FILEDIA" 0)',
-                '(setvar "CMDDIA" 0)',
-                '(if (getvar "REPORTERROR") (setvar "REPORTERROR" 0))',
-                f'(setvar "TRUSTEDPATHS" "{self._scr_path(self.runtime_root)}")',
-                f'(load "{self._scr_path(self.runtime_lisp)}")',
-                f'(GNI:RUN-EXTERNAL-WRITER "{mode}" "{self._scr_path(action_file)}" "{self._scr_path(result_tsv)}" "{self.target_layer}" {self.target_color})',
-                "",
-            ]
-            script.write_text("\n".join(lines), encoding="ascii", errors="replace")
-
-            creation_flags = (
-                getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
-            )
-            process = run_console(
-                [
-                    str(self.core),
-                    "/i",
-                    str(working),
-                    "/s",
-                    str(script),
-                    "/l",
-                    "en-US",
-                ],
-                capture_output=True,
-                text=False,
-                timeout=self.timeout,
-                cwd=str(job),
-                creationflags=creation_flags,
-            )
-            output.exit_code = process.returncode
-            combined = self._decode(process.stdout) + "\n" + self._decode(process.stderr)
-            log.write_text(
-                f"VERSION={STABLE_WRITER_VERSION}\nEXIT_CODE={process.returncode}\n{combined}",
-                encoding="utf-8",
-                errors="replace",
-            )
-
             if self.LOAD_MARKER not in combined:
                 raise StableWriterError("STABLE_LISP_LOAD_FAILED")
-            if self.FAILURE_MARKER in combined:
+            if strict and self.FAILURE_MARKER in combined:
                 raise StableWriterError("STABLE_ACTION_EXECUTION_FAILED")
-            if self.SUCCESS_MARKER not in combined:
+            if strict and self.SUCCESS_MARKER not in combined:
                 raise StableWriterError("STABLE_SUCCESS_MARKER_NOT_FOUND")
-            if self.EXIT_MARKER not in combined:
+            if strict and self.EXIT_MARKER not in combined:
                 raise StableWriterError("STABLE_EXIT_MARKER_NOT_FOUND")
             if not result_tsv.is_file():
                 raise StableWriterError("STABLE_RESULT_MISSING")
@@ -441,82 +537,212 @@ class StableExternalActionWriter:
         output.elapsed_seconds = round(time.time() - started, 3)
         return output
 
-    def run_plan(self, plan):
-        job = self.job_root / (
-            datetime.now().strftime("%Y%m%d_%H%M%S_")
-            + plan["drawing_type"]
-            + "_"
-            + plan["identity"]
-            + "_"
-            + uuid.uuid4().hex[:8]
+    def _failed_output(self, plan, mode, job, error, started):
+        output = StableOutput(
+            plan["identity"], plan["drawing_type"], mode, "FAILED",
+            str(Path(plan["primary_geometry"]).resolve()),
+            str(job / f"{self._safe(plan['identity'])}_{mode}.dwg"), str(job),
+            result_tsv=str(job / f"{mode}_result.tsv"),
+            log_path=str(job / f"{mode}_stable_writer.log"),
         )
-        job.mkdir(parents=True, exist_ok=False)
+        output.error = error
+        output.elapsed_seconds = round(time.time() - started, 3)
+        return output
+
+    def _run_output(self, plan, mode, job):
+        started = time.time()
+        try:
+            output = self._stage_output(plan, mode, job)
+        except Exception as error:
+            return self._failed_output(plan, mode, job, repr(error), started)
+        script = job / f"{mode}_stable_writer.scr"
+        script.write_text(
+            "\n".join([*self._script_header(), self._writer_call(output), ""]),
+            encoding="ascii",
+            errors="replace",
+        )
+        creation_flags = (
+            getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+        )
+        try:
+            process = run_console(
+                [str(self.core), "/i", str(output.working_dwg), "/s", str(script),
+                 "/l", "en-US"],
+                capture_output=True,
+                text=False,
+                timeout=self.timeout,
+                cwd=str(job),
+                creationflags=creation_flags,
+            )
+        except subprocess.TimeoutExpired:
+            Path(output.log_path).write_text(
+                f"VERSION={STABLE_WRITER_VERSION}\nSTATUS=FAILED\n"
+                f"ERROR=CORE_TIMEOUT:{self.timeout}\n",
+                encoding="utf-8", errors="replace",
+            )
+            output.status = "FAILED"
+            output.error = f"CORE_TIMEOUT:{self.timeout}"
+            output.elapsed_seconds = round(time.time() - started, 3)
+            return output
+        combined = self._decode(process.stdout) + "\n" + self._decode(process.stderr)
+        Path(output.log_path).write_text(
+            f"VERSION={STABLE_WRITER_VERSION}\nEXIT_CODE={process.returncode}\n{combined}",
+            encoding="utf-8",
+            errors="replace",
+        )
+        return self._verify_output(
+            output, combined, process.returncode, started, strict=True
+        )
+
+    @staticmethod
+    def _finish_pair(pair):
+        failed = [item for item in pair.outputs if item.status == "FAILED"]
+        if failed or pair.status == "FAILED" or len(pair.outputs) != 2:
+            pair.status = "FAILED"
+            pair.errors = list(pair.errors) + [
+                item.output_revision + ":" + item.error for item in failed
+            ]
+            if not pair.errors:
+                pair.errors = ["PAIR_OUTPUTS_INCOMPLETE"]
+        else:
+            pair.status = "LOCAL_PAIR_WRITTEN_NOT_VALIDATED"
+            pair.errors = []
+        return pair
+
+    def run_plan(self, plan):
+        job = self._new_job(plan["drawing_type"] + "_" + plan["identity"])
         result = StablePairResult(plan["identity"], plan["drawing_type"], "PROCESSING")
         for mode in ("A", "00"):
             result.outputs.append(self._run_output(plan, mode, job))
-        failed = [item for item in result.outputs if item.status == "FAILED"]
-        result.status = (
-            "FAILED" if failed else "LOCAL_PAIR_WRITTEN_NOT_VALIDATED"
+        return self._finish_pair(result)
+
+    def run_batch(self, plans):
+        """Write every plan's A and 00 output inside ONE Core Console process.
+
+        Core Console startup (~4.5 s) dwarfs a single write (0.5-2 s), so a
+        process that opens drawing after drawing is the only lever that removes
+        that cost. Every output keeps its own folder, working DWG, action TSV
+        and result TSV, and each one is judged only by its own artefacts, so a
+        sibling's success can never promote it.
+        """
+        plans = list(plans)
+        if not plans:
+            return []
+        if len(plans) == 1:
+            return [self.run_plan(plans[0])]
+        started = time.time()
+        batch = self._new_job("batch_" + str(plans[0].get("identity", "")))
+        batch_log = batch / "batch.log"
+        batch_log.write_text(
+            f"VERSION={STABLE_WRITER_VERSION}\nBATCH_PLANS={len(plans)}\n",
+            encoding="utf-8",
         )
-        result.errors = [item.output_revision + ":" + item.error for item in failed]
-        return result
+        pairs = []
+        runnable = []
+        for plan in plans:
+            pair = StablePairResult(
+                plan["identity"], plan["drawing_type"], "PROCESSING"
+            )
+            pairs.append(pair)
+            try:
+                job = batch / self._safe(plan["identity"])
+                job.mkdir(parents=True, exist_ok=False)
+            except OSError as error:
+                pair.status = "FAILED"
+                pair.errors = [f"STAGING_FAILED:{error!r}"]
+                continue
+            for mode in ("A", "00"):
+                try:
+                    pair.outputs.append(self._stage_output(plan, mode, job))
+                except Exception as error:
+                    pair.outputs.append(
+                        self._failed_output(plan, mode, job, repr(error), started)
+                    )
+            if any(item.status == "PROCESSING" for item in pair.outputs):
+                runnable.append(pair)
 
-    def run_many(self, plans, workers=None, on_result=None, should_cancel=None):
-        """Run independent plans through a bounded Core Console worker pool.
+        if runnable:
+            outputs = [item for pair in runnable for item in pair.outputs
+                       if item.status == "PROCESSING"]
+            lines = list(self._script_header())
+            for index, output in enumerate(outputs):
+                if index:
+                    # LISP state does not survive `_.OPEN`, so the header is
+                    # re-issued before every write.
+                    lines.extend([self._dirty_guard(),
+                                  self._open_line(output.working_dwg)])
+                    lines.extend(self._script_header())
+                lines.append(self._writer_call(output))
+            lines.extend([self._dirty_guard(), "_.QUIT", "_Y"])
+            script = batch / "batch_writer.scr"
+            script.write_text("\n".join(lines) + "\n", encoding="ascii",
+                              errors="replace")
+            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+            # Every output keeps the full single-drawing allowance, so batching
+            # never tightens the timeout a serial run would have had.
+            timeout = self.timeout * max(1, len(outputs))
+            combined, failure = "", None
+            try:
+                process = run_console(
+                    [str(self.core), "/i", str(outputs[0].working_dwg), "/s",
+                     str(script), "/l", "en-US"],
+                    capture_output=True, text=False, timeout=timeout,
+                    cwd=str(batch), creationflags=flags,
+                )
+                combined = (self._decode(process.stdout) + "\n"
+                            + self._decode(process.stderr))
+                exit_code = process.returncode
+                with batch_log.open("a", encoding="utf-8", errors="replace") as stream:
+                    stream.write(f"\nSTATUS=CORE_COMPLETED\nEXIT_CODE={exit_code}\n"
+                                 f"{combined}")
+            except subprocess.TimeoutExpired as error:
+                combined = self._decode(error.stdout) + "\n" + self._decode(error.stderr)
+                exit_code = None
+                failure = f"CORE_TIMEOUT_BATCH:{len(outputs)}:{timeout}"
+                with batch_log.open("a", encoding="utf-8", errors="replace") as stream:
+                    stream.write(f"\nSTATUS=FAILED\nERROR={failure}\n{combined}")
+            except Exception as error:
+                combined, exit_code = "", None
+                failure = f"STABLE_WRITER_BATCH_FAILED:{error!r}"
+                with batch_log.open("a", encoding="utf-8", errors="replace") as stream:
+                    stream.write(f"\nSTATUS=FAILED\nERROR={failure}\n")
+            for output in outputs:
+                if failure:
+                    output.status = "FAILED"
+                    output.error = failure
+                    output.elapsed_seconds = round(time.time() - started, 3)
+                    Path(output.log_path).write_text(
+                        f"VERSION={STABLE_WRITER_VERSION}\nBATCH={batch.name}\n"
+                        f"STATUS=FAILED\nERROR={failure}\n{combined}",
+                        encoding="utf-8", errors="replace",
+                    )
+                    continue
+                self._verify_output(output, combined, exit_code, started, strict=False)
+                detail = (f"VERSION={STABLE_WRITER_VERSION}\nBATCH={batch.name}\n"
+                          f"EXIT_CODE={exit_code}\nSTATUS={output.status}\n"
+                          f"ERROR={output.error}\n")
+                if output.status == "FAILED":
+                    detail += combined
+                Path(output.log_path).write_text(detail, encoding="utf-8",
+                                                 errors="replace")
+        return [self._finish_pair(pair) for pair in pairs]
 
-        Core Console startup dominates (~5 s per process), so running pairs
-        concurrently is the main throughput lever. Each plan owns a unique job
-        folder, which keeps concurrent QSAVE writes isolated.
+    def run_many(self, plans, workers=None, on_result=None, should_cancel=None,
+                 batch_size=1):
+        """Write independent plans through a bounded pool of batched processes.
+
+        Two levers, exactly like the discovery stage: ``batch_size`` plans per
+        Core Console process and ``workers`` processes in flight. Each plan owns
+        a unique job folder, which keeps concurrent QSAVE writes isolated.
         """
         plans = list(plans)
         workers = max(1, int(workers or self.max_workers))
-        results = {}
-        order = {str(plan.get("identity")): index for index, plan in enumerate(plans)}
-
-        def record(result):
-            results[str(result.identity)] = result
-            if on_result:
-                on_result(result)
-
-        if workers == 1 or len(plans) <= 1:
-            for plan in plans:
-                if should_cancel and should_cancel():
-                    break
-                record(self.run_plan(plan))
-        else:
-            def submit_next(pool, pending, iterator):
-                try:
-                    plan = next(iterator)
-                except StopIteration:
-                    return False
-                pending[pool.submit(self.run_plan, plan)] = plan
-                return True
-
-            iterator = iter(plans)
-            pending = {}
-            with ThreadPoolExecutor(
-                max_workers=workers, thread_name_prefix="gni-writer"
-            ) as pool:
-                for _ in range(workers):
-                    if not submit_next(pool, pending, iterator):
-                        break
-                while pending:
-                    done, _ = wait(list(pending), return_when=FIRST_COMPLETED)
-                    for future in done:
-                        pending.pop(future)
-                        record(future.result())
-                    if should_cancel and should_cancel():
-                        for future in pending:
-                            future.cancel()
-                        break
-                    while len(pending) < workers and submit_next(
-                        pool, pending, iterator
-                    ):
-                        pass
-
-        return [
-            results[key] for key in sorted(results, key=lambda key: order.get(key, 10**9))
-        ]
+        batch_size = clamp_batch_size(batch_size, default=1)
+        return run_batched(
+            self.run_plan, self.run_batch, plans,
+            batch_size=batch_size, workers=workers,
+            on_result=on_result, should_cancel=should_cancel,
+        )
 
     @staticmethod
     def write_report(bundle_root, results):
@@ -543,5 +769,5 @@ class StableExternalActionWriter:
         temporary.write_text(
             json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
         )
-        os.replace(temporary, path)
+        atomic_replace(temporary, path)
         return path

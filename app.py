@@ -14,32 +14,37 @@ from runtime.production_workers import DiscoveryWorker, ProductionPlanWorker
 from runtime.background_controller import BackgroundOperationController
 from reporting.dashboard import ReportDashboard
 from runtime import fonts,logging_setup,paths
+from runtime.job_state import load_scan_state,load_supporting_results,load_discovery_results,load_revision_plans,resolve_bundle_root,clone_should_be_skipped,write_scan_state
 from runtime.coreconsole import detect as detect_core_console
 BASE=paths.app_root();CFG=paths.settings_path()
 PIPELINE=(('scan','Scan source'),('destination','Build destination'),('clone','Clone supporting files'),('discovery','Discover title blocks'),('plan','Build revision plan'),('writer','Stable external writer'),('validator','Reopen validator'),('dryrun','Atomic publish dry run'),('publish','Atomic publisher'),('pdf','Publish PDFs'))
 STAGE_REPORTS={'destination':'destination_manifest.json','clone':'supporting_file_clone_report.json','discovery':'title_block_discovery_report.json','plan':'revision_pilot_write_plan.json','writer':'stable_external_writer_report.json','validator':'reopen_validation_report.json','dryrun':'atomic_publish_dry_run_report.json','publish':'atomic_publish_report.json','pdf':'pdf_publish_report.json'}
 AUTO_STAGES=('scan','destination','clone','discovery','plan','writer','validator','dryrun')
+class NoWheelComboBox(QComboBox):
+ def wheelEvent(self,event):event.ignore()
+class NoWheelSpinBox(QSpinBox):
+ def wheelEvent(self,event):event.ignore()
 class Main(QMainWindow):
  def __init__(self):
-  super().__init__();self.setWindowIcon(QIcon(str(BASE/'resources'/'app_icon.ico')));self.bg=BackgroundOperationController(self);self.bg.progress.connect(self._bg_progress);self.bg.status.connect(self.status_update_safe);self.bg.finished.connect(self._bg_finished);self.bg.failed.connect(self._bg_failed);self.resize(1500,850);self.setWindowTitle(f'Gamma to Nederwiek - Revision Migration ({paths.version()} - new job reset)');self.s=Settings.load(CFG);self._finished_root=None;self.files=[];self.groups=[];self.support=[];self._chain=False;self._skipped=set();self._running_stage=None;self._busy=False
+  super().__init__();self.setWindowIcon(QIcon(str(BASE/'resources'/'app_icon.ico')));self.bg=BackgroundOperationController(self);self.bg.progress.connect(self._bg_progress);self.bg.status.connect(self.status_update_safe);self.bg.finished.connect(self._bg_finished);self.bg.failed.connect(self._bg_failed);self.resize(1500,850);self.setWindowTitle(f'Gamma to Nederwiek - Revision Migration ({paths.version()} - new job reset)');self.s=Settings.load(CFG);self._finished_root=None;self._report_signature=None;self.files=[];self.groups=[];self.support=[];self._chain=False;self._skipped=set();self._running_stage=None;self._busy=False
   tabs=QTabWidget();self.setCentralWidget(tabs);w=QWidget();tabs.addTab(w,'Setup');l=QVBoxLayout(w);f=QFormLayout();self.src=QLineEdit(self.s.source_folder);self.dst=QLineEdit(self.s.destination_root);self.bundle=QLineEdit(self.s.destination_bundle_name);self.exe=QLineEdit(self.s.core_console or detect_core_console())
   for label,e,folder in [('Source',self.src,True),('Destination root',self.dst,True),('Bundle name',self.bundle,None),('accoreconsole.exe',self.exe,False)]:f.addRow(label,self.browse(e,folder) if folder is not None else e)
   l.addLayout(f);self.maped=[]
   m=QGroupBox('Controlled replacement mapping');mf=QFormLayout(m)
   for label,attr,default in [('Project from','project_from','IJMUIDEN VER GAMMA'),('Project to','project_to','NEDERWIEK BETA'),('Drawing from','drawing_from','2013J310015'),('Drawing to','drawing_to','I301-J30019'),('Long ref from','long_from','OEPA230146'),('Long ref to','long_to','OEPA240101'),('Short ref from','short_from','230146'),('Short ref to','short_to','240101'),('Contractor doc-id from','contractor_doc_from','2GWG'),('Contractor doc-id to','contractor_doc_to','2GWN')]:e=QLineEdit(getattr(self.s,attr,default));self.maped.append((attr,e));mf.addRow(label,e)
-  l.addWidget(m);pg=QGroupBox('Migration pipeline');pv=QVBoxLayout(pg);self.stage_tbl=self.table(['Step','Stage','Status','Report']);self.stage_tbl.setEditTriggers(QAbstractItemView.NoEditTriggers);self.stage_tbl.setSelectionMode(QAbstractItemView.SingleSelection);self.stage_tbl.setSelectionBehavior(QAbstractItemView.SelectRows);self.stage_tbl.setMaximumHeight(230);self.stage_tbl.cellDoubleClicked.connect(self.open_stage_report);pv.addWidget(self.stage_tbl)
+  l.addWidget(m);self.recent=NoWheelComboBox();self.recent.activated.connect(self._recent_selected);lr=QHBoxLayout();lr.addWidget(QLabel('Load previous job'));lr.addWidget(self.recent,1);l.addLayout(lr);self._populate_recent_jobs();pg=QGroupBox('Migration pipeline');pv=QVBoxLayout(pg);self.stage_tbl=self.table(['Step','Stage','Status','Report']);self.stage_tbl.setEditTriggers(QAbstractItemView.NoEditTriggers);self.stage_tbl.setSelectionMode(QAbstractItemView.SingleSelection);self.stage_tbl.setSelectionBehavior(QAbstractItemView.SelectRows);self.stage_tbl.setMaximumHeight(230);self.stage_tbl.cellDoubleClicked.connect(self.open_stage_report);pv.addWidget(self.stage_tbl)
   self.primary=QPushButton('Run: Scan source');self.primary.setMinimumHeight(38);self.primary.clicked.connect(self.run_next_stage);self.primary.setDefault(True);pv.addWidget(self.primary)
   # Only reachable once the PDF stage is complete and nothing is running; the
   # pipeline derives every row from report files, so this clears session state
   # instead of deleting evidence on disk.
   self.newjobb=QPushButton('New Job (clear inputs)');self.newjobb.setEnabled(False);self.newjobb.setToolTip('Available after the PDF stage is complete. Clears every result, table and input field so the next job starts from Scan.');self.newjobb.clicked.connect(self.new_job);pv.addWidget(self.newjobb)
-  prow=QHBoxLayout();self.cancelb=QPushButton('Cancel Safely');self.cancelb.setEnabled(False);self.cancelb.clicked.connect(self.cancel_unified_operation);self.workers=QSpinBox();self.workers.setRange(1,16);self.workers.setValue(max(1,min(16,int(getattr(self.s,'workers',4)))));self.workers.setToolTip('Concurrent Core Console processes for the writer, validator and PDF stages. 4-6 is a good starting point.');prow.addWidget(self.cancelb);prow.addStretch();prow.addWidget(QLabel('Parallel workers'));prow.addWidget(self.workers);pv.addLayout(prow)
+  prow=QHBoxLayout();self.cancelb=QPushButton('Cancel Safely');self.cancelb.setEnabled(False);self.cancelb.clicked.connect(self.cancel_unified_operation);self.workers=NoWheelSpinBox();self.workers.setRange(1,16);self.workers.setValue(max(1,min(16,int(getattr(self.s,'workers',4)))));self.workers.setToolTip('Concurrent Core Console processes. Discovery, writer, validator, dry-run, publish and PDF all use this pool. 12 is the efficient ceiling on a 12-core machine; more only adds contention.');self.batch=NoWheelSpinBox();self.batch.setRange(1,16);self.batch.setValue(max(1,min(16,int(getattr(self.s,'discovery_batch_size',4)))));self.batch.setToolTip('Drawings per Core Console process, for every drawing stage (discovery, writer, validator, PDF). Core Console startup is ~5 s while one drawing takes under 2 s, so 4-8 is 3-5x faster than 1. Total speed-up is batch x workers; set 1 for the slow one-process-per-drawing baseline.');prow.addWidget(self.cancelb);prow.addStretch();prow.addWidget(QLabel('Batch size'));prow.addWidget(self.batch);prow.addWidget(QLabel('Parallel workers'));prow.addWidget(self.workers);pv.addLayout(prow)
   self.prog=QProgressBar();pv.addWidget(self.prog);self.status=QLabel('Ready. The button runs every remaining step up to the publish gate.');self.status.setWordWrap(True);pv.addWidget(self.status)
   self.adv=QGroupBox('Advanced - run or re-run one stage');self.adv.setCheckable(True);self.adv.setChecked(False);ag=QGridLayout(self.adv);self.stage_buttons={}
   for index,(key,label) in enumerate(PIPELINE):button=QPushButton(label);button.clicked.connect(lambda checked=False,stage=key:self.run_stage(stage));button.setEnabled(False);ag.addWidget(button,index//3,index%3);self.stage_buttons[key]=button
   self.adv.toggled.connect(self._sync_advanced_buttons);pv.addWidget(self.adv);l.addWidget(pg);l.addStretch();self._sync_advanced_buttons(False)
   w2=QWidget();tabs.addTab(w2,'Drawing Candidates');ll=QVBoxLayout(w2);self.tbl=self.table(['Type','Identity','Primary source','A donor','Candidates','Warning']);ll.addWidget(self.tbl)
-  ws=QWidget();tabs.addTab(ws,'Supporting File Clone');sl=QVBoxLayout(ws);self.stbl=self.table(['Select','Role','Extension','Source Path','Destination','Status','Action','Backup','Error']);sl.addWidget(self.stbl);sbar=QHBoxLayout();self.cloneb=QPushButton('Clone Selected Supporting Files');self.cloneb.clicked.connect(self.clone_supporting);self.policy=QComboBox();self.policy.addItems(['BACKUP_OVERWRITE','SKIP_DIFFERENT','KEEP_BOTH']);self.retryb=QPushButton('Retry Failed Copies');self.retryb.clicked.connect(self.retry_supporting);self.openb=QPushButton('Open Supporting Destination');self.openb.clicked.connect(self.open_supporting_destination);sbar.addWidget(self.cloneb);sbar.addWidget(QLabel('Collision:'));sbar.addWidget(self.policy);sbar.addWidget(self.retryb);sbar.addWidget(self.openb);sbar.addStretch();sl.addLayout(sbar);self.support_results=[]
+  ws=QWidget();tabs.addTab(ws,'Supporting File Clone');sl=QVBoxLayout(ws);self.stbl=self.table(['Select','Role','Extension','Source Path','Destination','Status','Action','Backup','Error']);sl.addWidget(self.stbl);sbar=QHBoxLayout();self.cloneb=QPushButton('Clone Selected Supporting Files');self.cloneb.clicked.connect(self.clone_supporting);self.policy=NoWheelComboBox();self.policy.addItems(['BACKUP_OVERWRITE','SKIP_DIFFERENT','KEEP_BOTH']);self.retryb=QPushButton('Retry Failed Copies');self.retryb.clicked.connect(self.retry_supporting);self.openb=QPushButton('Open Supporting Destination');self.openb.clicked.connect(self.open_supporting_destination);sbar.addWidget(self.cloneb);sbar.addWidget(QLabel('Collision:'));sbar.addWidget(self.policy);sbar.addWidget(self.retryb);sbar.addWidget(self.openb);sbar.addStretch();sl.addLayout(sbar);self.support_results=[]
   wd=QWidget();tabs.addTab(wd,'Title Block Discovery');dl=QVBoxLayout(wd);self.dtbl=self.table(['Identity','Type','Source','Entity','Handle','Layer','Block','Tag','Value','Suggested Field','Confidence','Score','Evidence','Proposed A','Proposed 00','Warning']);dl.addWidget(self.dtbl);self.discovery_results=[]
   wp=QWidget();tabs.addTab(wp,'Revision Plan');pl=QVBoxLayout(wp);self.ptbl=self.table(['Identity','Type','Status','Primary Geometry','A Source Policy','Migration Date','A Date','00 Date','Actions','Warnings','Errors']);pl.addWidget(self.ptbl);self.revision_plans=[]
   w3=QWidget();tabs.addTab(w3,'Reports');lll=QVBoxLayout(w3);self.rtbl=self.table(['Report','Modified','Size (KB)']);self.rtbl.cellDoubleClicked.connect(self.open_report);self._report_paths=[]
@@ -151,7 +156,7 @@ class Main(QMainWindow):
   defaults=self._new_job_defaults()
   self.src.setText(defaults.source_folder);self.dst.setText(defaults.destination_root);self.bundle.setText(defaults.destination_bundle_name);self.exe.setText(defaults.core_console)
   for attr,edit in self.maped:edit.setText(getattr(defaults,attr,''))
-  self.workers.setValue(max(1,min(16,int(getattr(defaults,'workers',4)))))
+  self.workers.setValue(max(1,min(16,int(getattr(defaults,'workers',4)))));self.batch.setValue(max(1,min(16,int(getattr(defaults,'discovery_batch_size',4)))))
   self.prog.setRange(0,100);self.prog.setValue(0)
   message=f'New job ready. {removed} report/checkpoint file(s) cleared; all tables and inputs reset. The button runs every step up to the publish gate.'
   if left:message+=f' {left} file(s) could not be deleted (in use?) - close AutoCAD/Core Console windows and retry.'
@@ -234,14 +239,25 @@ class Main(QMainWindow):
  def _tab_changed(self,index):
   if self.centralWidget().tabText(index)=='Reports':self.refresh_reports()
  def reports_root(self):return Path(self.dst.text())/self.bundle.text()/'_GNI_REPORTS'
+ def _reports_signature(self,root):
+  """Cheap change detector: name + mtime_ns + size of every report file.
+
+  Re-entering the Reports page used to re-parse the JSON and rebuild a
+  300-row table even when nothing had changed.  The signature makes that a
+  no-op; a stage that writes a report always changes at least one tuple."""
+  try:return (str(root),tuple(sorted((p.name,p.stat().st_mtime_ns,p.stat().st_size) for p in root.iterdir() if p.is_file())))
+  except OSError:return (str(root),)
  def refresh_reports(self):
-  root=self.reports_root();self._report_paths=[];self.rtbl.setRowCount(0)
+  root=self.reports_root();signature=self._reports_signature(root)
+  if signature==self._report_signature:return
+  self._report_paths=[];self.rtbl.setRowCount(0)
   if hasattr(self,'dashboard'):self.dashboard.refresh(root)
-  if not root.is_dir():self.status.setText('Reports: no _GNI_REPORTS folder yet for this bundle');return
+  if not root.is_dir():self._report_signature=signature;self.status.setText('Reports: no _GNI_REPORTS folder yet for this bundle');return
   files=sorted((p for p in root.iterdir() if p.is_file()),key=lambda p:p.stat().st_mtime,reverse=True);stamp=__import__('datetime').datetime.fromtimestamp;self.rtbl.setRowCount(len(files))
   for row,path in enumerate(files):
    stat=path.stat();self._report_paths.append(path)
    for column,value in enumerate([path.name,stamp(stat.st_mtime).strftime('%Y-%m-%d %H:%M:%S'),f'{stat.st_size/1024:.1f}']):self.rtbl.setItem(row,column,QTableWidgetItem(value))
+  self._report_signature=signature
   self.status.setText(f'Reports: {len(files)} file(s) in {root}')
  def open_report(self,row,column):
   if 0<=row<len(self._report_paths):self._open_path(self._report_paths[row])
@@ -275,8 +291,72 @@ class Main(QMainWindow):
  def save(self):
   self.s.source_folder=self.src.text();self.s.destination_root=self.dst.text();self.s.destination_bundle_name=self.bundle.text();self.s.core_console=self.exe.text()
   if hasattr(self,'workers'):self.s.workers=int(self.workers.value())
+  if hasattr(self,'batch'):self.s.discovery_batch_size=int(self.batch.value())
   for a,e in self.maped:setattr(self.s,a,e.text())
   self.s.save(CFG)
+ def _populate_recent_jobs(self):
+  self.recent.clear();self.recent.addItem('Select a recent job…','')
+  for root in (getattr(self.s,'recent_jobs',None) or []):
+   p=Path(root);self.recent.addItem((p.name if p.name else str(root)),str(root))
+  self.recent.addItem('Browse…','__browse__')
+ def _recent_selected(self,index):
+  key=self.recent.itemData(index) or ''
+  if key=='__browse__':self.load_previous_job()
+  elif key:self.load_previous_job(key)
+  self._populate_recent_jobs()
+ def _remember_job(self,path):
+  try:
+   jobs=[p for p in (getattr(self.s,'recent_jobs',None) or []) if p!=str(path)];jobs.insert(0,str(path));self.s.recent_jobs=jobs[:8];self.s.save(CFG);self._populate_recent_jobs()
+  except Exception:pass
+ def _persist_scan_state(self):
+  try:
+   mapping={attr:edit.text() for attr,edit in self.maped}
+   root=Path(self.dst.text())/self.bundle.text()
+   write_scan_state(root/'_GNI_REPORTS',source_root=self.src.text(),destination_root=self.dst.text(),bundle_name=self.bundle.text(),mapping=mapping,files=self.files,groups=self.groups,supporting=self.support)
+   self._remember_job(str(root))
+  except Exception:pass
+ def load_previous_job(self,selected=None):
+  """Point the app at an existing bundle and resume from its reports.
+
+  Loading is read-only with respect to published DWGs/PDFs and backups: it only
+  restores the scan/mapping state and the in-memory table views, then lets
+  ``refresh_pipeline()``/``next_stage()`` derive where to continue."""
+  if self._busy or self._running_stage or self._chain:
+   QMessageBox.information(self,'Load previous job','A stage is still running. Wait for it to finish first.');return
+  if not selected:
+   selected=QFileDialog.getExistingDirectory(self,'Load previous job','Select a bundle folder or its _GNI_REPORTS folder')
+  if not selected:return
+  root=resolve_bundle_root(selected)
+  if root is None:
+   QMessageBox.information(self,'Load previous job','That folder is not a GNI job bundle. Select the bundle folder (the one containing _GNI_REPORTS) or the _GNI_REPORTS folder itself.');return
+  reports=root/'_GNI_REPORTS';state=load_scan_state(reports)
+  if state is None:
+   src=QFileDialog.getExistingDirectory(self,'Load previous job','This bundle has no saved scan state (created before job loading). Choose the source folder to scan:')
+   if not src:return
+   try:
+    from scanner.universal import Scanner
+    scanner=Scanner(src);files=scanner.scan();groups=scanner.groups(files);supporting=scanner.supporting(files)
+   except Exception as error:QMessageBox.critical(self,'Load previous job',f'Scan failed: {error}');return
+   mapping={attr:edit.text() for attr,edit in self.maped};destination_root=str(root.parent);bundle_name=root.name
+  else:
+   src=state.source_root;files=state.files;groups=state.groups;supporting=state.supporting;mapping=dict(state.mapping);destination_root=state.destination_root or str(root.parent);bundle_name=state.bundle_name or root.name
+  self.src.setText(src or '');self.dst.setText(destination_root);self.bundle.setText(bundle_name)
+  for attr,edit in self.maped:
+   if attr in mapping:edit.setText(str(mapping[attr]))
+  self.files=files;self.groups=groups;self.support=supporting
+  self.support_results=load_supporting_results(reports);self.discovery_results=load_discovery_results(reports);self.revision_plans=load_revision_plans(reports)
+  self._skipped=set()
+  if clone_should_be_skipped(reports,supporting):self._skipped.add('clone')
+  self._report_signature=None;self._finished_root=None
+  self.populate_supporting();self.refresh_support_results();self.refresh_discovery();self.refresh_revision_plan()
+  self.tbl.setRowCount(len(self.groups))
+  for r,g in enumerate(self.groups):
+   for c,v in enumerate([g.drawing_type,g.identity,g.primary_source or '',g.revision_a_donor or '',str(len(g.candidates)),g.warning]):self.tbl.setItem(r,c,QTableWidgetItem(v))
+  self.save();self._remember_job(str(root));self.refresh_pipeline();self.refresh_reports()
+  nxt=self.next_stage();summary=f'Loaded job "{bundle_name}".\n\nSource: {src or "(not set)"}\nIdentities: {len(self.groups)}'
+  summary+=(('\n\nNext stage: '+nxt[1]) if nxt else '\n\nAll pipeline stages are complete.')
+  if src and not Path(src).is_dir():summary+='\n\nWARNING: the recorded source folder no longer exists. Reports stay reviewable, but scanning/discovery/planning need a valid Source.'
+  QMessageBox.information(self,'Load previous job',summary)
  def run_controlled_writer(self):
   root=Path(self.dst.text())/self.bundle.text();report=root/'_GNI_REPORTS'/'stable_external_writer_report.json'
   try:
@@ -284,7 +364,7 @@ class Main(QMainWindow):
    if not plan.is_file():QMessageBox.critical(self,'Stable Writer','Build Revision Plan first.');return False
    plans,rejected=StableExternalActionWriter.load_ready_plans(plan,return_rejected=True)
    if rejected:self._report_rejected('Stable Writer',rejected)
-   self._start_bg('writer',{'plans':plans,'core':self.exe.text(),'lisp':BASE/'lisp'/'stable_external_writer.lsp','app':BASE,'bundle_root':root,'workers':int(self.workers.value())});return True
+   self._start_bg('writer',{'plans':plans,'core':self.exe.text(),'lisp':BASE/'lisp'/'stable_external_writer.lsp','app':BASE,'bundle_root':root,'workers':int(self.workers.value()),'batch_size':int(self.batch.value())});return True
   except StableWriterError as e:return self._gate_blocked('Stable Writer',report,e)
   except Exception as e:QMessageBox.critical(self,'Stable Writer failed',str(e));return False
  def run_reopen_validator(self):
@@ -292,7 +372,7 @@ class Main(QMainWindow):
   try:
    self.save();pairs,rejected=StableReopenValidator.load_writer_results(root/'_GNI_REPORTS'/'stable_external_writer_report.json',return_rejected=True)
    if rejected:self._report_rejected('Reopen Validator',rejected)
-   self._start_bg('validator',{'pairs':pairs,'core':self.exe.text(),'lisp':BASE/'lisp'/'reopen_validator.lsp','app':BASE,'bundle_root':root,'workers':int(self.workers.value())});return True
+   self._start_bg('validator',{'pairs':pairs,'core':self.exe.text(),'lisp':BASE/'lisp'/'reopen_validator.lsp','app':BASE,'bundle_root':root,'workers':int(self.workers.value()),'batch_size':int(self.batch.value())});return True
   except ReopenValidationError as e:return self._gate_blocked('Reopen Validator',report,e)
   except Exception as e:QMessageBox.critical(self,'Reopen Validator failed',str(e));return False
  def run_atomic_publish_dry_run(self):
@@ -300,7 +380,7 @@ class Main(QMainWindow):
   try:
    self.save();pairs,rejected=AtomicPublisherDryRun.load_validated_pairs(root,return_rejected=True)
    if rejected:self._report_rejected('Atomic Dry Run',rejected)
-   self._start_bg('dryrun',{'pairs':pairs,'app':BASE,'bundle_root':root,'workers':int(self.workers.value())});return True
+   self._start_bg('dryrun',{'pairs':pairs,'app':BASE,'bundle_root':root,'workers':int(self.workers.value()),'batch_size':int(self.batch.value())});return True
   except AtomicPublishDryRunError as e:return self._gate_blocked('Atomic Dry Run',report,e)
   except Exception as e:QMessageBox.critical(self,'Atomic Dry Run failed',str(e));return False
  def _report_rejected(self,stage,rejected):
@@ -355,7 +435,7 @@ class Main(QMainWindow):
    if rejected:self._report_rejected('Atomic Publisher',rejected)
    overwrites=sum(f.get('destination_exists',False) for p in packages for f in p['dry_run'].get('files',[]));answer=QMessageBox.question(self,'Confirm Atomic Publishing',f'Publish {len(packages)} validated pair(s)?\nSkipped by gate: {len(rejected)}\nExisting files: {overwrites}\nBundle: {root}',QMessageBox.Yes|QMessageBox.No,QMessageBox.No)
    if answer!=QMessageBox.Yes:return False
-   self._start_bg('publish',{'packages':packages,'app':BASE,'bundle_root':root,'workers':int(self.workers.value())});return True
+   self._start_bg('publish',{'packages':packages,'app':BASE,'bundle_root':root,'workers':int(self.workers.value()),'batch_size':int(self.batch.value())});return True
   except AtomicPublishError as e:return self._gate_blocked('Atomic Publisher',report,e)
   except Exception as e:QMessageBox.critical(self,'Atomic Publisher failed',str(e));return False
  def run_pdf_publisher(self):
@@ -364,10 +444,10 @@ class Main(QMainWindow):
    if not report.is_file():QMessageBox.critical(self,'PDF Publisher','Run Atomic Publisher first.');return False
    answer=QMessageBox.question(self,'Confirm PDF Publishing',f'Generate and publish PDFs from PUBLISHED destination DWGs?\n\nExisting PDFs are backed up first; unchanged pairs are skipped.\n\nBundle:\n{builder.bundle_root}',QMessageBox.Yes|QMessageBox.No,QMessageBox.No)
    if answer!=QMessageBox.Yes:return False
-   self._set_pipeline_busy(True);self.prog.setRange(0,0);self.status.setText('Preparing PDF Publisher...');self.pdf_worker=PdfPublishWorker(self.exe.text(),builder.bundle_root,BASE,int(self.workers.value()));self.pdf_worker.progress.connect(self._on_pdf_progress);self.pdf_worker.completed.connect(self._on_pdf_complete);self.pdf_worker.failed.connect(self._on_pdf_failed);self.pdf_worker.start();return True
+   self._set_pipeline_busy(True);self.prog.setRange(0,0);self.status.setText('Preparing PDF Publisher...');self.pdf_worker=PdfPublishWorker(self.exe.text(),builder.bundle_root,BASE,int(self.workers.value()),int(self.batch.value()));self.pdf_worker.progress.connect(self._on_pdf_progress);self.pdf_worker.completed.connect(self._on_pdf_complete);self.pdf_worker.failed.connect(self._on_pdf_failed);self.pdf_worker.start();return True
   except Exception as error:self._on_pdf_failed(str(error));return False
  def _on_pdf_progress(self,current,total,identity,stage):
-  self.prog.setRange(0,total);self.prog.setValue(max(0,current-1));self.status.setText(f'PDF Publisher ({int(self.workers.value())} workers): {current} of {total} | {identity} | {stage}')
+  self.prog.setRange(0,total);self.prog.setValue(max(0,current-1));self.status.setText(f'PDF Publisher ({int(self.workers.value())} workers x {int(self.batch.value())} per process): {current} of {total} | {identity} | {stage}')
  def _on_pdf_complete(self,results,report):
   self._running_stage=None;self._set_pipeline_busy(False);self.prog.setRange(0,100);self.prog.setValue(100);ok=sum(r.status=='PDF_PAIR_PUBLISHED' for r in results);failed=len(results)-ok;unchanged=sum(o.status=='PDF_UNCHANGED' for r in results for o in r.outputs);failed_pairs=[r for r in results if r.status!='PDF_PAIR_PUBLISHED'];self.status.setText(f'PDF Publisher: {ok} pairs published ({unchanged} unchanged), {failed} failed');self.refresh_pipeline()
   # A long batch can have many failures; show the headline in the dialog and keep
@@ -421,11 +501,11 @@ class Main(QMainWindow):
   child_registry.cancel_shutdown()
   event.accept()
  def _set_pipeline_busy(self,busy):
-  self._busy=busy;self.primary.setEnabled(not busy);self.workers.setEnabled(not busy);self.cloneb.setEnabled(not busy);self._sync_advanced_buttons(self.adv.isChecked());self.cancelb.setEnabled(busy);self.newjobb.setEnabled(not busy and self.job_finished())
+  self._busy=busy;self.primary.setEnabled(not busy);self.workers.setEnabled(not busy);self.batch.setEnabled(not busy);self.cloneb.setEnabled(not busy);self._sync_advanced_buttons(self.adv.isChecked());self.cancelb.setEnabled(busy);self.newjobb.setEnabled(not busy and self.job_finished())
  def _start_bg(self,operation,payload):
   self._set_pipeline_busy(True);self.prog.setRange(0,0);self.status.setText('Starting '+operation+'...');self.bg.start(operation,payload)
  def _bg_progress(self,current,total,identity,output,stage):
-  self.prog.setRange(0,max(total,1));self.prog.setValue(current);self.status.setText(f'{self.bg.operation} ({int(self.workers.value())} workers): {current} of {total} | {identity} | {output} | {stage}')
+  self.prog.setRange(0,max(total,1));self.prog.setValue(current);self.status.setText(f'{self.bg.operation} ({int(self.workers.value())} workers x {int(self.batch.value())} per process): {current} of {total} | {identity} | {output} | {stage}')
  def cancel_unified_operation(self):
   worker=getattr(self,'discovery_worker',None) or getattr(self,'plan_worker',None) or getattr(self,'pdf_worker',None)
   if worker and worker.isRunning() and hasattr(worker,'cancel'):worker.cancel();self.status.setText('Cancellation requested. Current safe unit will finish first.')
@@ -436,7 +516,7 @@ class Main(QMainWindow):
    self.files=result['files'];self.groups=result['groups'];self.support=result['supporting'];self.populate_supporting();self.tbl.setRowCount(len(self.groups))
    for r,g in enumerate(self.groups):
     for c,v in enumerate([g.drawing_type,g.identity,g.primary_source or '',g.revision_a_donor or '',str(len(g.candidates)),g.warning]):self.tbl.setItem(r,c,QTableWidgetItem(v))
-   message=f'Scan {state}: {len(self.groups)} identities';ok=bool(self.groups)
+   self._persist_scan_state();message=f'Scan {state}: {len(self.groups)} identities';ok=bool(self.groups)
   elif operation=='destination':message=result.message
   elif operation=='clone':
    self.support_results=result;self.refresh_support_results();message=f'Supporting clone {state}: {len(result)} processed';ok=all(x.status!='FAILED' for x in result)
@@ -483,10 +563,10 @@ class Main(QMainWindow):
    if not groups:QMessageBox.information(self,'Title Block Discovery','No drawing groups are selected.');return False
    self.discovery_results=[];self._discovery_started=__import__('time').monotonic();self._discovery_last=(0,len(groups),'','Preparing discovery job');self._set_pipeline_busy(True);self.prog.setRange(0,len(groups));self.prog.setValue(0)
    self._heartbeat=QTimer(self);self._heartbeat.timeout.connect(self._update_activity_heartbeat);self._heartbeat.start(1000)
-   self.discovery_worker=DiscoveryWorker(groups,self.exe.text(),self.dst.text(),self.bundle.text(),self.src.text(),self.s,BASE);self.discovery_worker.progress.connect(self._on_discovery_progress);self.discovery_worker.activity.connect(lambda identity,stage:self._set_activity(identity,stage));self.discovery_worker.completed.connect(self._on_discovery_complete);self.discovery_worker.failed.connect(self._on_background_failed);self.discovery_worker.start();return True
+   self.discovery_worker=DiscoveryWorker(groups,self.exe.text(),self.dst.text(),self.bundle.text(),self.src.text(),self.s,BASE,int(self.workers.value()),int(self.batch.value()));self.discovery_worker.progress.connect(self._on_discovery_progress);self.discovery_worker.activity.connect(lambda identity,stage:self._set_activity(identity,stage));self.discovery_worker.completed.connect(self._on_discovery_complete);self.discovery_worker.failed.connect(self._on_background_failed);self.discovery_worker.start();return True
   except Exception as error:self._on_background_failed(str(error));return False
  def _on_discovery_progress(self,current,total,identity,stage):
-  self._discovery_last=(current,total,identity,stage);self.prog.setRange(0,total);self.prog.setValue(max(0,current-1 if stage!='Drawing completed' else current));self._update_activity_heartbeat()
+  self._discovery_last=(current,total,identity,stage);self.prog.setRange(0,total);self.prog.setValue(min(current,total));self._update_activity_heartbeat()
  def _set_activity(self,identity,stage):
   current,total,_,_=getattr(self,'_discovery_last',(0,0,'',''));self._discovery_last=(current,total,identity,stage);self._update_activity_heartbeat()
  def _update_activity_heartbeat(self):

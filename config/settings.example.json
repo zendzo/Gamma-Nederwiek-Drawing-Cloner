@@ -14,5 +14,6 @@
   "target_layer": "NEDERWIEK_DATA",
   "contractor_doc_from": "2GWG",
   "contractor_doc_to": "2GWN",
-  "workers": 4
+  "workers": 12,
+  "discovery_batch_size": 4
 }

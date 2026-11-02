@@ -10,10 +10,10 @@ import tempfile
 import uuid
 from typing import Dict, List
 
+from runtime.atomic_io import atomic_replace
 from runtime.hashing import sha256_file
-from runtime.parallel import run_pool
 
-PUBLISHER_VERSION = "0.4C.2B-atomic-publisher-commit"
+PUBLISHER_VERSION = "0.4C.26-batched-atomic-publisher-commit"
 
 
 class AtomicPublishError(RuntimeError):
@@ -119,7 +119,7 @@ class AtomicPublisher:
             json.dump(payload, stream, indent=2, ensure_ascii=False)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, path)
+        atomic_replace(temporary, path)
 
     @staticmethod
     def _copy_verified(source, destination, expected_hash=""):
@@ -139,7 +139,7 @@ class AtomicPublisher:
         if actual_hash != wanted:
             temporary.unlink(missing_ok=True)
             raise AtomicPublishError("COPY_HASH_MISMATCH")
-        os.replace(temporary, destination)
+        atomic_replace(temporary, destination)
         return actual_hash
 
     @staticmethod
@@ -351,7 +351,7 @@ class AtomicPublisher:
     def _commit_path(self, temporary, destination):
         destination = Path(destination)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(temporary, destination)
+        atomic_replace(temporary, destination)
 
     def _rollback(self, transaction):
         errors = []
@@ -452,17 +452,28 @@ class AtomicPublisher:
             self._journal(transaction, "precommit_failed")
         return transaction
 
-    def publish_many(self, packages, workers=1, on_result=None, should_cancel=None):
-        """Publish packages, optionally in parallel, returning them in input order.
+    def publish_many(self, packages, workers=1, on_result=None, should_cancel=None,
+                     batch_size=1):
+        """Publish packages strictly one transaction at a time.
 
-        Same contract as ``inspect_many``: ``on_result`` fires in completion order
-        and the returned list is re-sorted. Each package is an independent
-        transaction (own staging, backup and journal), so parallel commits do not
-        interleave.
+        ``workers`` and ``batch_size`` are accepted so every stage shares one
+        call shape, but they are ignored on purpose. Every package publishes the
+        same shared reference rasters into the same CAD folders, so two
+        concurrent transactions of one drawing type raced on ``os.replace``
+        (PermissionError) or failed the asset existence re-check after the other
+        commit. Publishing is a few seconds of file copies in total, so serial
+        costs nothing measurable. A cancel stops between transactions only.
         """
-        return run_pool(
-            self.publish_package, packages, workers, on_result, should_cancel
-        )
+        del workers, batch_size
+        results = []
+        for package in packages:
+            if should_cancel and should_cancel():
+                break
+            result = self.publish_package(package)
+            results.append(result)
+            if on_result:
+                on_result(result)
+        return results
 
     @staticmethod
     def write_report(bundle_root, transactions):
@@ -487,5 +498,5 @@ class AtomicPublisher:
             json.dump(payload, stream, indent=2, ensure_ascii=False)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, path)
+        atomic_replace(temporary, path)
         return path

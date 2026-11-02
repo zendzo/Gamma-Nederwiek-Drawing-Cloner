@@ -9,6 +9,8 @@ import shutil
 import uuid
 from typing import List
 
+from runtime.atomic_io import atomic_replace
+
 
 @dataclass
 class DestinationBuildResult:
@@ -188,7 +190,7 @@ class DestinationBuilder:
                 os.fsync(dst.fileno())
             if temporary.stat().st_size != source.stat().st_size:
                 raise OSError("Temporary raster-copy size mismatch")
-            os.replace(temporary, destination)
+            atomic_replace(temporary, destination)
         finally:
             if temporary.exists():
                 temporary.unlink()
@@ -232,7 +234,7 @@ class DestinationBuilder:
         temporary.write_text(
             json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
         )
-        os.replace(temporary, manifest)
+        atomic_replace(temporary, manifest)
 
     def build(self, source_root, copy_assets_to_all_cad=True):
         self.validate_source_separation(source_root)

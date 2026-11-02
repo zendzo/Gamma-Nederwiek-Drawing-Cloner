@@ -127,13 +127,18 @@ class PipelineWorker(QThread):
         for result in results:
             row=asdict(result);row['source_sha256']=source_hash.get(result.identity,'');row['plan_sha256']=plan_hash.get(result.identity,'');rows.append(row)
         payload={'schema':'GNI-Stable-Writer-Checkpoint-0.4C.7','updated_at':datetime.now().astimezone().isoformat(),'total_pairs':total,'completed_pairs':len(results),'skipped':skipped,'cancelled':cancelled,'results':rows}
-        path=self._writer_checkpoint;path.parent.mkdir(parents=True,exist_ok=True);tmp=path.with_suffix('.json.tmp');tmp.write_text(json.dumps(payload,indent=2,ensure_ascii=False),encoding='utf-8');os.replace(tmp,path)
+        path=self._writer_checkpoint;path.parent.mkdir(parents=True,exist_ok=True)
+        temporary=path.with_name(path.name + ".tmp-" + str(os.getpid()) + "-" + str(threading.get_ident()))
+        temporary.write_text(json.dumps(payload,indent=2,ensure_ascii=False),encoding='utf-8')
+        from runtime.atomic_io import atomic_replace
+        atomic_replace(temporary,path)
 
     def _run_writer(self):
         from revision.stable_external_writer import StableExternalActionWriter, StablePairResult, StableOutput
         plans=self.payload['plans'];total=len(plans);previous=self._load_writer_checkpoint();results=[];skipped=0
         writer=StableExternalActionWriter(self.payload['core'],self.payload['lisp'],self.payload['app'])
         workers=max(1,int(self.payload.get('workers') or writer.max_workers))
+        batch_size=max(1,int(self.payload.get('batch_size') or 1))
         source_hash={p['identity']:self._sha(p['primary_geometry']) for p in plans if Path(p['primary_geometry']).is_file()}
         plan_hash={p['identity']:self._plan_sha(p) for p in plans}
         todo=[]
@@ -145,10 +150,12 @@ class PipelineWorker(QThread):
             else:todo.append(plan)
         if skipped:self.progress.emit(skipped,total,'','PAIR',f'Reused {skipped} valid checkpoint(s)')
         last=[0.0];fatal=threading.Event()
+        checkpoint_lock=threading.Lock()
         def save(force=False):
             now=time.monotonic()
             if force or now-last[0]>=5:
-                self._write_writer_checkpoint(results,total,False,skipped,plans,source_hash,plan_hash);last[0]=now
+                with checkpoint_lock:
+                    self._write_writer_checkpoint(results,total,False,skipped,plans,source_hash,plan_hash);last[0]=now
         def on_result(result):
             # Runs on pool threads: a raise here would kill a worker mid-pool and
             # leave run_many's wait() spin forever.
@@ -159,13 +166,14 @@ class PipelineWorker(QThread):
                 fatal.set()
                 raise
         try:
-            writer.run_many(todo,workers=workers,on_result=on_result,should_cancel=lambda:self.cancel_requested)
+            writer.run_many(todo,workers=workers,on_result=on_result,should_cancel=lambda:self.cancel_requested,batch_size=batch_size)
         finally:
             order={p['identity']:index for index,p in enumerate(plans)}
             results.sort(key=lambda item:order.get(item.identity,10**9))
             cancelled=self.cancel_requested and len(results)<total
             report=writer.write_report(self.payload['bundle_root'],results)
-            self._write_writer_checkpoint(results,total,cancelled,skipped,plans,source_hash,plan_hash)
+            with checkpoint_lock:
+                self._write_writer_checkpoint(results,total,cancelled,skipped,plans,source_hash,plan_hash)
         if fatal.is_set():raise RuntimeError('WRITER_CHECKPOINT_WRITE_FAILED: see the log for the underlying error')
         return results,report,cancelled,skipped
 
@@ -174,6 +182,7 @@ class PipelineWorker(QThread):
         pairs=self.payload['pairs'];total=len(pairs);results=[];skipped=0
         validator=StableReopenValidator(self.payload['core'],self.payload['lisp'],self.payload['app'])
         workers=max(1,int(self.payload.get('workers') or 4))
+        batch_size=max(1,int(self.payload.get('batch_size') or 1))
         checkpoint=Path(self.payload['bundle_root'])/'_GNI_REPORTS'/'reopen_validation_checkpoint.json'
         try:
             previous={x['identity']:x for x in json.loads(checkpoint.read_text(encoding='utf-8')).get('results',[]) if x.get('status')=='VALIDATED'}
@@ -188,10 +197,16 @@ class PipelineWorker(QThread):
             else:todo.append(pair)
         if skipped:self.progress.emit(skipped,total,'','PAIR',f'Reused {skipped} validated checkpoint(s)')
         last=[0.0];fatal=threading.Event()
+        checkpoint_lock=threading.Lock()
         def save(force=False):
             now=time.monotonic()
             if force or now-last[0]>=5:
-                payload={'schema':'GNI-Reopen-Checkpoint-0.4C.7','total_pairs':total,'completed_pairs':len(results),'skipped':skipped,'cancelled':False,'results':[asdict(x) for x in results]};tmp=checkpoint.with_suffix('.tmp');tmp.write_text(json.dumps(payload,indent=2),encoding='utf-8');os.replace(tmp,checkpoint);last[0]=now
+                with checkpoint_lock:
+                    payload={'schema':'GNI-Reopen-Checkpoint-0.4C.7','total_pairs':total,'completed_pairs':len(results),'skipped':skipped,'cancelled':False,'results':[asdict(x) for x in results]}
+                    temporary=checkpoint.with_name(checkpoint.name + ".tmp-" + str(os.getpid()) + "-" + str(threading.get_ident()))
+                    temporary.write_text(json.dumps(payload,indent=2),encoding='utf-8')
+                    from runtime.atomic_io import atomic_replace
+                    atomic_replace(temporary,checkpoint);last[0]=now
         def on_result(result):
             if fatal.is_set():return
             try:
@@ -200,7 +215,7 @@ class PipelineWorker(QThread):
                 fatal.set()
                 raise
         try:
-            validator.validate_many(todo,workers=workers,on_result=on_result,should_cancel=lambda:self.cancel_requested)
+            validator.validate_many(todo,workers=workers,on_result=on_result,should_cancel=lambda:self.cancel_requested,batch_size=batch_size)
         finally:
             order={pair['identity']:index for index,pair in enumerate(pairs)};results.sort(key=lambda item:order.get(item.identity,10**9))
             report=validator.write_report(self.payload['bundle_root'],results)
@@ -211,21 +226,23 @@ class PipelineWorker(QThread):
         from revision.atomic_publish_dry_run import AtomicPublisherDryRun
         pairs=self.payload['pairs'];publisher=AtomicPublisherDryRun(self.payload['bundle_root'],self.payload['app']);total=len(pairs)
         workers=max(1,int(self.payload.get('workers') or 1));count=[0]
+        batch_size=max(1,int(self.payload.get('batch_size') or 1))
         def on_result(result):
             # Completion order, not plan order: report the pair that just finished.
             count[0]+=1;self.progress.emit(count[0],total,result.identity,'PAIR','Checked hashes, locks, paths and assets')
-        results=publisher.inspect_many(pairs,workers=workers,on_result=on_result,should_cancel=lambda:self.cancel_requested)
+        results=publisher.inspect_many(pairs,workers=workers,on_result=on_result,should_cancel=lambda:self.cancel_requested,batch_size=batch_size)
         report=publisher.write_report(self.payload['bundle_root'],results);return results,report,self.cancel_requested and len(results)<total,0
 
     def _run_publish(self):
         from revision.atomic_publisher import AtomicPublisher
         packages=self.payload['packages'];publisher=AtomicPublisher(self.payload['bundle_root'],self.payload['app']);total=len(packages)
         workers=max(1,int(self.payload.get('workers') or 1));count=[0]
+        batch_size=max(1,int(self.payload.get('batch_size') or 1))
         def on_result(result):
             count[0]+=1;self.progress.emit(count[0],total,result.identity,'TRANSACTION','Published or rolled back')
         # Publishing is destructive, so a cancel stops between transactions only;
         # an in-flight transaction always completes or rolls back as a unit.
-        results=publisher.publish_many(packages,workers=workers,on_result=on_result,should_cancel=lambda:self.cancel_requested)
+        results=publisher.publish_many(packages,workers=workers,on_result=on_result,should_cancel=lambda:self.cancel_requested,batch_size=batch_size)
         report=publisher.write_report(self.payload['bundle_root'],results);return results,report,self.cancel_requested and len(results)<total,0
 
 

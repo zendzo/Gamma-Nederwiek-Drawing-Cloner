@@ -10,14 +10,17 @@ import subprocess
 import tempfile
 import time
 import uuid
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from typing import List
 
+from runtime.batching import clamp_batch_size, run_batched
+from runtime.atomic_io import atomic_replace
 from runtime.console_text import decode_console
 from runtime.hashing import sha256_file
 from runtime.process_tracking import run_console
 
-VALIDATOR_VERSION = "0.4C.6-parallel-validator"
+# 0.4C.26: one Core Console process reopens a whole batch of written pairs
+# instead of one process per output.
+VALIDATOR_VERSION = "0.4C.26-batched-validator"
 
 
 class ReopenValidationError(RuntimeError):
@@ -123,17 +126,16 @@ class StableReopenValidator:
         with Path(path).open("r", encoding="cp1252", errors="replace", newline="") as stream:
             return sum(1 for _ in csv.DictReader(stream, delimiter="\t"))
 
-    def _validate_output(self, pair, source_output, session):
-        started = time.time()
+    def _stage_output(self, pair, source_output, session):
+        """Prepare one output for validation (no Core Console yet)."""
         mode = source_output["output_revision"]
         dwg = Path(source_output["working_dwg"]).resolve()
         actions = Path(source_output["action_file"]).resolve()
-        result_tsv = session / f"{mode}_validation.tsv"
-        log = session / f"{mode}_validation.log"
-        script = session / f"{mode}_validation.scr"
         output = ValidationOutput(
             pair["identity"], pair["drawing_type"], mode, "PROCESSING",
-            str(dwg), str(actions), str(result_tsv), str(log),
+            str(dwg), str(actions),
+            str(session / f"{mode}_validation.tsv"),
+            str(session / f"{mode}_validation.log"),
         )
         try:
             if not dwg.is_file():
@@ -145,39 +147,88 @@ class StableReopenValidator:
             expected_hash = str(source_output.get("sha256", ""))
             if expected_hash and output.sha256_before != expected_hash:
                 raise ReopenValidationError("PRE_VALIDATION_HASH_MISMATCH")
+            self._write_script(session, mode, actions, Path(output.result_tsv))
+        except Exception as error:
+            output.status = "FAILED"
+            output.error = repr(error)
+        return output
 
-            script.write_text("\n".join([
-                '(setvar "FILEDIA" 0)',
-                '(setvar "CMDDIA" 0)',
-                '(if (getvar "REPORTERROR") (setvar "REPORTERROR" 0))',
-                f'(setvar "TRUSTEDPATHS" "{self._scr_path(self.runtime_root)}")',
-                f'(load "{self._scr_path(self.runtime_lisp)}")',
-                f'(GNI:RUN-REOPEN-VALIDATOR "{mode}" "{self._scr_path(actions)}" "{self._scr_path(result_tsv)}")',
-                "",
-            ]), encoding="ascii", errors="replace")
+    def _write_script(self, session, mode, actions, result_tsv):
+        script = Path(session) / f"{mode}_validation.scr"
+        script.write_text("\n".join([
+            '(setvar "FILEDIA" 0)',
+            '(setvar "CMDDIA" 0)',
+            '(if (getvar "REPORTERROR") (setvar "REPORTERROR" 0))',
+            f'(setvar "TRUSTEDPATHS" "{self._scr_path(self.runtime_root)}")',
+            f'(load "{self._scr_path(self.runtime_lisp)}")',
+            f'(GNI:RUN-REOPEN-VALIDATOR "{mode}" "{self._scr_path(actions)}" '
+            f'"{self._scr_path(result_tsv)}")',
+            "",
+        ]), encoding="ascii", errors="replace")
+        return script
 
-            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
-            process = run_console(
-                [str(self.core), "/i", str(dwg), "/s", str(script), "/l", "en-US"],
-                capture_output=True, text=False, timeout=self.timeout,
-                cwd=str(session), creationflags=flags,
-            )
-            output.exit_code = process.returncode
-            combined = self._decode(process.stdout) + "\n" + self._decode(process.stderr)
-            log.write_text(
-                f"VERSION={VALIDATOR_VERSION}\nEXIT_CODE={process.returncode}\n{combined}",
-                encoding="utf-8", errors="replace",
-            )
+    def _script_header(self):
+        return [
+            '(setvar "FILEDIA" 0)',
+            '(setvar "CMDDIA" 0)',
+            '(if (getvar "REPORTERROR") (setvar "REPORTERROR" 0))',
+            f'(setvar "TRUSTEDPATHS" "{self._scr_path(self.runtime_root)}")',
+            f'(load "{self._scr_path(self.runtime_lisp)}")',
+        ]
+
+    @staticmethod
+    def _call(mode, actions, result_tsv):
+        clean = str(Path(actions).resolve()).replace("\\", "/").replace('"', '\\"')
+        target = str(Path(result_tsv).resolve()).replace("\\", "/").replace('"', '\\"')
+        return f'(GNI:RUN-REOPEN-VALIDATOR "{mode}" "{clean}" "{target}")'
+
+    @staticmethod
+    def _dirty_guard():
+        """Never let a dirty drawing turn `_.OPEN` into a batch-killing prompt.
+
+        Validation must not modify the working DWG (that is one of its checks),
+        so this only fires when something already went wrong - and then saving
+        the file makes the hash check below fail that output instead of hanging
+        the rest of the batch.
+        """
+        return (
+            '(if (/= 0 (getvar "DBMOD")) '
+            '(progn (princ "\\nGNI_BATCH_DIRTY_DOCUMENT_SAVED") '
+            '(vl-catch-all-apply (quote command-s) (list "_.QSAVE"))))'
+        )
+
+    @staticmethod
+    def _open_line(path):
+        """Open the next drawing from LISP so spaces in the path survive.
+
+        Same reason as the writer: a bare ``_.OPEN`` line is truncated at the
+        first space, and Core Console then blocks on the filename prompt until
+        the batch timeout.
+        """
+        target = str(Path(path).resolve()).replace("\\", "/").replace('"', '\\"')
+        return ('(vl-catch-all-apply (quote (lambda () '
+                '(command-s "_.OPEN" "' + target + '"))))')
+
+    def _verify_output(self, output, combined, exit_code, started, strict):
+        """Judge one output by its own validation TSV, not by shared console text."""
+        result_tsv = Path(output.result_tsv)
+        dwg = Path(output.working_dwg)
+        output.exit_code = exit_code
+        try:
             if self.LOAD_MARKER not in combined:
                 raise ReopenValidationError("VALIDATOR_LISP_LOAD_FAILED")
-            if self.FAILURE_MARKER in combined:
+            if strict and self.FAILURE_MARKER in combined:
                 raise ReopenValidationError("VALIDATION_CHECK_FAILED")
-            if self.SUCCESS_MARKER not in combined or self.EXIT_MARKER not in combined:
+            if strict and (
+                self.SUCCESS_MARKER not in combined
+                or self.EXIT_MARKER not in combined
+            ):
                 raise ReopenValidationError("VALIDATION_SUCCESS_MARKER_MISSING")
             if not result_tsv.is_file():
                 raise ReopenValidationError("VALIDATION_RESULT_MISSING")
 
-            with result_tsv.open("r", encoding="utf-8-sig", errors="replace", newline="") as stream:
+            with result_tsv.open("r", encoding="utf-8-sig", errors="replace",
+                                 newline="") as stream:
                 rows = list(csv.DictReader(stream, delimiter="\t"))
             output.checks_passed = sum(row.get("Status") == "PASS" for row in rows)
             output.checks_failed = sum(row.get("Status") == "FAIL" for row in rows)
@@ -202,6 +253,57 @@ class StableReopenValidator:
         output.elapsed_seconds = round(time.time() - started, 3)
         return output
 
+    def _validate_output(self, pair, source_output, session):
+        started = time.time()
+        output = self._stage_output(pair, source_output, session)
+        if output.status == "FAILED":
+            output.elapsed_seconds = round(time.time() - started, 3)
+            return output
+        script = Path(session) / f"{output.output_revision}_validation.scr"
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+        try:
+            process = run_console(
+                [str(self.core), "/i", str(output.working_dwg), "/s", str(script),
+                 "/l", "en-US"],
+                capture_output=True, text=False, timeout=self.timeout,
+                cwd=str(session), creationflags=flags,
+            )
+        except subprocess.TimeoutExpired:
+            Path(output.log_path).write_text(
+                f"VERSION={VALIDATOR_VERSION}\nSTATUS=FAILED\n"
+                f"ERROR=VALIDATION_TIMEOUT:{self.timeout}\n",
+                encoding="utf-8", errors="replace",
+            )
+            output.status = "FAILED"
+            output.error = f"VALIDATION_TIMEOUT:{self.timeout}"
+            output.elapsed_seconds = round(time.time() - started, 3)
+            return output
+        combined = self._decode(process.stdout) + "\n" + self._decode(process.stderr)
+        Path(output.log_path).write_text(
+            f"VERSION={VALIDATOR_VERSION}\nEXIT_CODE={process.returncode}\n{combined}",
+            encoding="utf-8", errors="replace",
+        )
+        return self._verify_output(
+            output, combined, process.returncode, started, strict=True
+        )
+
+    @staticmethod
+    def _finish_pair(result):
+        failed = [item for item in result.outputs if item.status != "VALIDATED"]
+        if failed or result.status == "FAILED" or len(result.outputs) != 2:
+            result.status = "FAILED"
+            extra = [item.output_revision + ":" + item.error for item in failed]
+            errors = list(dict.fromkeys(list(result.errors) + extra))
+            result.errors = errors or ["PAIR_OUTPUTS_INCOMPLETE"]
+            return result
+        hashes = {item.sha256_before for item in result.outputs}
+        if len(hashes) != 2:
+            result.status = "FAILED"
+            result.errors.append("A_AND_00_HASHES_IDENTICAL")
+        else:
+            result.status = "VALIDATED"
+        return result
+
     def validate_pair(self, pair):
         session = self.validation_root / (
             datetime.now().strftime("%Y%m%d_%H%M%S_")
@@ -211,70 +313,112 @@ class StableReopenValidator:
         result = ValidationPair(pair["identity"], pair["drawing_type"], "PROCESSING")
         for output in sorted(pair["outputs"], key=lambda item: item["output_revision"]):
             result.outputs.append(self._validate_output(pair, output, session))
-        failed = [item for item in result.outputs if item.status != "VALIDATED"]
-        if not failed:
-            hashes = {item.sha256_before for item in result.outputs}
-            if len(hashes) != 2:
-                result.status = "FAILED"
-                result.errors.append("A_AND_00_HASHES_IDENTICAL")
-            else:
-                result.status = "VALIDATED"
-        else:
-            result.status = "FAILED"
-            result.errors.extend(item.output_revision + ":" + item.error for item in failed)
-        return result
+        return self._finish_pair(result)
 
-    def validate_many(self, pairs, workers=1, on_result=None, should_cancel=None):
-        """Validate independent pairs through a bounded Core Console pool."""
+    def validate_batch(self, pairs):
+        """Reopen every output of a batch of pairs in ONE Core Console process.
+
+        Validation is read-only, so reopening drawing after drawing in a single
+        session is safe as long as nothing is saved; the per-output hash check
+        proves that, and one output's failure never reaches its siblings.
+        """
+        pairs = list(pairs)
+        if not pairs:
+            return []
+        if len(pairs) == 1:
+            return [self.validate_pair(pairs[0])]
+        started = time.time()
+        batch = self.validation_root / (
+            datetime.now().strftime("%Y%m%d_%H%M%S_")
+            + "batch_" + pairs[0]["identity"] + "_" + uuid.uuid4().hex[:8]
+        )
+        batch.mkdir(parents=True, exist_ok=False)
+        results = []
+        jobs = []
+        for pair in pairs:
+            session = batch / ("".join(
+                char if char.isalnum() or char in "._-" else "_"
+                for char in str(pair["identity"])
+            )[:80] or "pair")
+            try:
+                session.mkdir(parents=True, exist_ok=False)
+            except OSError as error:
+                failed = ValidationPair(pair["identity"], pair["drawing_type"],
+                                        "FAILED", errors=[f"STAGING_FAILED:{error!r}"])
+                results.append(failed)
+                continue
+            result = ValidationPair(pair["identity"], pair["drawing_type"], "PROCESSING")
+            for source_output in sorted(pair["outputs"],
+                                        key=lambda item: item["output_revision"]):
+                job = self._stage_output(pair, source_output, session)
+                if job.status != "FAILED":
+                    jobs.append((result, job))
+                result.outputs.append(job)
+            results.append(result)
+
+        runnable = [job for _, job in jobs]
+        if runnable:
+            lines = list(self._script_header())
+            for index, job in enumerate(runnable):
+                if index:
+                    lines.extend([self._dirty_guard(),
+                                  self._open_line(job.working_dwg)])
+                    lines.extend(self._script_header())
+                lines.append(self._call(job.output_revision, job.action_file,
+                                        job.result_tsv))
+            lines.extend([self._dirty_guard(), "_.QUIT", "_Y"])
+            script = batch / "batch_validator.scr"
+            script.write_text("\n".join(lines) + "\n", encoding="ascii",
+                              errors="replace")
+            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+            timeout = self.timeout * max(1, len(runnable))
+            combined, failure, exit_code = "", None, None
+            try:
+                process = run_console(
+                    [str(self.core), "/i", str(runnable[0].working_dwg), "/s",
+                     str(script), "/l", "en-US"],
+                    capture_output=True, text=False, timeout=timeout,
+                    cwd=str(batch), creationflags=flags,
+                )
+                exit_code = process.returncode
+                combined = (self._decode(process.stdout) + "\n"
+                            + self._decode(process.stderr))
+            except subprocess.TimeoutExpired as error:
+                combined = self._decode(error.stdout) + "\n" + self._decode(error.stderr)
+                failure = f"VALIDATION_TIMEOUT_BATCH:{len(runnable)}:{timeout}"
+            except Exception as error:
+                failure = f"VALIDATION_BATCH_FAILED:{error!r}"
+            for job in runnable:
+                if failure:
+                    job.status = "FAILED"
+                    job.error = failure
+                    job.elapsed_seconds = round(time.time() - started, 3)
+                    if Path(job.working_dwg).is_file():
+                        job.sha256_after = self._sha256(job.working_dwg)
+                else:
+                    self._verify_output(job, combined, exit_code, started, strict=False)
+                detail = (f"VERSION={VALIDATOR_VERSION}\nBATCH={batch.name}\n"
+                          f"EXIT_CODE={exit_code}\nSTATUS={job.status}\n"
+                          f"ERROR={job.error}\n")
+                if job.status == "FAILED":
+                    detail += combined
+                Path(job.log_path).write_text(detail, encoding="utf-8",
+                                              errors="replace")
+        # Statuses were computed before the run; recompute once the artefacts
+        # exist so a batch-promoted sibling is impossible.
+        return [self._finish_pair(result) for result in results]
+
+    def validate_many(self, pairs, workers=1, on_result=None, should_cancel=None,
+                      batch_size=1):
+        """Validate independent pairs through a bounded pool of batched processes."""
         pairs = list(pairs)
         workers = max(1, int(workers or 1))
-        results = {}
-        order = {str(pair.get("identity")): index for index, pair in enumerate(pairs)}
-
-        def record(result):
-            results[str(result.identity)] = result
-            if on_result:
-                on_result(result)
-
-        if workers == 1 or len(pairs) <= 1:
-            for pair in pairs:
-                if should_cancel and should_cancel():
-                    break
-                record(self.validate_pair(pair))
-        else:
-            def submit_next(pool, pending, iterator):
-                try:
-                    pair = next(iterator)
-                except StopIteration:
-                    return False
-                pending[pool.submit(self.validate_pair, pair)] = pair
-                return True
-
-            iterator = iter(pairs)
-            pending = {}
-            with ThreadPoolExecutor(
-                max_workers=workers, thread_name_prefix="gni-validator"
-            ) as pool:
-                for _ in range(workers):
-                    if not submit_next(pool, pending, iterator):
-                        break
-                while pending:
-                    done, _ = wait(list(pending), return_when=FIRST_COMPLETED)
-                    for future in done:
-                        pending.pop(future)
-                        record(future.result())
-                    if should_cancel and should_cancel():
-                        for future in pending:
-                            future.cancel()
-                        break
-                    while len(pending) < workers and submit_next(
-                        pool, pending, iterator
-                    ):
-                        pass
-
-        return [
-            results[key] for key in sorted(results, key=lambda key: order.get(key, 10**9))
-        ]
+        batch_size = clamp_batch_size(batch_size, default=1)
+        return run_batched(
+            self.validate_pair, self.validate_batch, pairs,
+            batch_size=batch_size, workers=workers,
+            on_result=on_result, should_cancel=should_cancel,
+        )
 
     @staticmethod
     def write_report(bundle_root, results):
@@ -295,5 +439,5 @@ class StableReopenValidator:
         }
         temporary = path.with_suffix(".json.tmp")
         temporary.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-        os.replace(temporary, path)
+        atomic_replace(temporary, path)
         return path

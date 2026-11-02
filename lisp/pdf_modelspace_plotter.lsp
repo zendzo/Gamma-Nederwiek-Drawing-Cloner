@@ -61,6 +61,12 @@
           (setvar "FILEDIA" 0)
           (setvar "CMDDIA" 0)
           (setvar "BACKGROUNDPLOT" 0)
+          ;; Raster logos (SEAtrium_Ge_.PNG / Tennet LogO New.PNG) must plot
+          ;; with no border. IMAGEFRAME 0 hides the frame while the image itself
+          ;; still plots; a lone (setvar "IMAGEFRAME" 0) can be ignored by -PLOT
+          ;; until the value is toggled, so force 1 then 0 before plotting.
+          (setvar "IMAGEFRAME" 1)
+          (setvar "IMAGEFRAME" 0)
           (setq response
             (vl-catch-all-apply
               '(lambda ()
@@ -95,4 +101,4 @@
       (princ "\nGNI_PDF_PUBLISHER_EXIT_READY")))
   (princ))
 
-(princ "\nGNI_PDF_MODELSPACE_PLOTTER_0_4C_5_LOADED")
+(princ "\nGNI_PDF_MODELSPACE_PLOTTER_0_4C_6_LOADED")

@@ -149,11 +149,12 @@ set "ACCORE="
 for /f "delims=" %%I in ('where accoreconsole.exe 2^>nul') do (
     if not defined ACCORE set "ACCORE=%%I"
 )
-if not defined ACCORE if exist "C:\Program Files\Autodesk\AutoCAD 2024\accoreconsole.exe" set "ACCORE=C:\Program Files\Autodesk\AutoCAD 2024\accoreconsole.exe"
-if not defined ACCORE if exist "C:\Program Files\Autodesk\AutoCAD 2023\accoreconsole.exe" set "ACCORE=C:\Program Files\Autodesk\AutoCAD 2023\accoreconsole.exe"
-if not defined ACCORE if exist "C:\Program Files\Autodesk\AutoCAD 2022\accoreconsole.exe" set "ACCORE=C:\Program Files\Autodesk\AutoCAD 2022\accoreconsole.exe"
-if not defined ACCORE if exist "C:\Program Files\Autodesk\AutoCAD 2021\accoreconsole.exe" set "ACCORE=C:\Program Files\Autodesk\AutoCAD 2021\accoreconsole.exe"
-if not defined ACCORE if exist "C:\Program Files\Autodesk\AutoCAD 2020\accoreconsole.exe" set "ACCORE=C:\Program Files\Autodesk\AutoCAD 2020\accoreconsole.exe"
+rem Newest install first: AutoCAD 2027 (this machine) has no PATH entry and was
+rem missing from the old hard-coded 2020-2024 list, so the preflight warned
+rem "every drawing stage will fail" while the pipeline ran fine.
+for /f "delims=" %%D in ('dir /b /ad /o-n "C:\Program Files\Autodesk\AutoCAD *" 2^>nul') do (
+    if not defined ACCORE if exist "C:\Program Files\Autodesk\%%D\accoreconsole.exe" set "ACCORE=C:\Program Files\Autodesk\%%D\accoreconsole.exe"
+)
 if defined ACCORE goto :accore_ok
 echo        [WARN] accoreconsole.exe not found on PATH or in the
 echo               default Autodesk folders.

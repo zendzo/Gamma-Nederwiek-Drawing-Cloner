@@ -5,6 +5,7 @@ import traceback
 from PySide6.QtCore import QThread, Signal
 
 from revision.pdf_publisher import PdfPublisher
+from runtime.batching import clamp_batch_size
 
 
 class PdfPublishWorker(QThread):
@@ -14,12 +15,13 @@ class PdfPublishWorker(QThread):
     completed = Signal(list, str)
     failed = Signal(str)
 
-    def __init__(self, core, bundle, app, workers=4):
+    def __init__(self, core, bundle, app, workers=4, batch_size=1):
         super().__init__()
         self.core = core
         self.bundle = bundle
         self.app = app
         self.workers = max(1, int(workers or 4))
+        self.batch_size = clamp_batch_size(batch_size, default=1)
         self._cancel_requested = False
 
     def cancel(self):
@@ -34,6 +36,7 @@ class PdfPublishWorker(QThread):
                 lambda a, b, c, d: self.progress.emit(a, b, c, d),
                 workers=self.workers,
                 should_cancel=lambda: self._cancel_requested,
+                batch_size=self.batch_size,
             )
             report = publisher.write_report(results)
             if self._cancel_requested:

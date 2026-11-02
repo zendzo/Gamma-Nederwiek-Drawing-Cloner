@@ -32,6 +32,22 @@ class SettingsTests(unittest.TestCase):
         self.path.write_text(json.dumps({"workers": "many"}), encoding="utf-8")
         self.assertEqual(Settings.load(self.path).workers, 4)
 
+    def test_discovery_batch_size_defaults_and_clamps(self):
+        self.assertEqual(Settings().discovery_batch_size, 4)
+        self.assertEqual(Settings(discovery_batch_size=8).discovery_batch_size, 8)
+        self.assertEqual(Settings(discovery_batch_size=0).discovery_batch_size, 1)
+        self.assertEqual(Settings(discovery_batch_size=999).discovery_batch_size, 16)
+        self.assertEqual(Settings(discovery_batch_size="many").discovery_batch_size, 4)
+
+    def test_older_settings_file_without_batch_size_still_loads(self):
+        # Configs written before 0.4C.24 have no key; they must not crash and
+        # must not disable batching.
+        self.path.parent.mkdir(parents=True)
+        self.path.write_text(json.dumps({"workers": 12}), encoding="utf-8")
+        loaded = Settings.load(self.path)
+        self.assertEqual(loaded.workers, 12)
+        self.assertEqual(loaded.discovery_batch_size, 4)
+
     def test_unknown_keys_are_ignored_instead_of_wiping_settings(self):
         self.path.parent.mkdir(parents=True)
         self.path.write_text(

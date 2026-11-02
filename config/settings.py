@@ -1,4 +1,4 @@
-from dataclasses import dataclass,asdict,fields
+from dataclasses import dataclass,asdict,field,fields
 from pathlib import Path
 import json
 @dataclass
@@ -8,9 +8,19 @@ class Settings:
     long_from:str='OEPA230146'; long_to:str='OEPA240101'; short_from:str='230146'; short_to:str='240101'; target_layer:str='NEDERWIEK_DATA'
     contractor_doc_from:str='2GWG'; contractor_doc_to:str='2GWN'
     workers:int=4
+    # Drawings opened per Core Console process. Core Console startup (~4.7 s)
+    # dominates any per-drawing work (0.5-2 s), so >1 amortises it. The field
+    # keeps its historical name but every drawing stage (discovery, writer,
+    # validator, PDF) reads it through runtime/batching.py.
+    discovery_batch_size:int=4
+    # Bundle roots the operator has opened, newest first (capped by _remember_job).
+    # Machine-local convenience only; the job itself lives in _GNI_REPORTS.
+    recent_jobs:list=field(default_factory=list)
     def __post_init__(self):
         try:self.workers=min(16,max(1,int(self.workers)))
         except (TypeError,ValueError):self.workers=4
+        try:self.discovery_batch_size=min(16,max(1,int(self.discovery_batch_size)))
+        except (TypeError,ValueError):self.discovery_batch_size=4
     @classmethod
     def load(cls,p):
         p=Path(p)

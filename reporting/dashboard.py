@@ -11,7 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Iterable
 
-from PySide6.QtCore import QRectF, Qt, Signal
+from PySide6.QtCore import QItemSelectionModel, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -46,6 +46,10 @@ from reporting.dashboard_data import (
 
 MAX_TABLE_ROWS = 300
 MAX_VISIBLE_ISSUES = 12
+# Default width of one stage column in the per-drawing matrix.  The header must
+# stay Interactive: ResizeToContents measures every row of every column on each
+# item insert and stalled this page for tens of seconds at ~600 drawings.
+MATRIX_COLUMN_WIDTH = 86
 
 TONE_COLORS = {
     "ok": "#166534",
@@ -889,11 +893,27 @@ class ReportDashboard(QWidget):
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setAlternatingRowColors(True)
         self.table.setShowGrid(False)
+        self.table.setWordWrap(False)
+        self.table.setTextElideMode(Qt.ElideRight)
+        self.table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self.table.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
         self.table.verticalHeader().setVisible(False)
         header = self.table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.ResizeToContents)
+        # Do NOT use ResizeToContents here.  Qt sizes such a column by asking
+        # for every row's size hint on every item insert; at 300 rows x 10
+        # columns under the app-wide QSS that turned a page switch into a
+        # 20-45 s freeze.  Identity stretches to absorb slack, every other
+        # column keeps an operator-resizable default width and the widths
+        # survive refreshes.
+        header.setSectionResizeMode(QHeaderView.Interactive)
         header.setSectionResizeMode(0, QHeaderView.Stretch)
         header.setStretchLastSection(False)
+        header.setMinimumSectionSize(52)
+        header.setDefaultSectionSize(MATRIX_COLUMN_WIDTH)
+        self.table.setColumnWidth(1, 64)
+        for column in range(2, 2 + len(TABLE_STAGES)):
+            self.table.setColumnWidth(column, MATRIX_COLUMN_WIDTH)
+        self.table.setColumnWidth(len(headers) - 1, 58)
         self._status_delegate = StatusDelegate(self.table)
         for column in range(2, 2 + len(TABLE_STAGES)):
             self.table.setItemDelegateForColumn(column, self._status_delegate)
@@ -994,27 +1014,63 @@ class ReportDashboard(QWidget):
                else f" · {len(drawings) - len(shown)} more match")
         )
 
+        # A refresh must not feel like a page reload: keep the operator where
+        # they were.  The identity is restored because row order can change.
+        scroll_value = self.table.verticalScrollBar().value()
+        current = self.table.currentRow()
+        selected_identity = None
+        if 0 <= current < self.table.rowCount():
+            selected_item = self.table.item(current, 0)
+            if selected_item is not None:
+                selected_identity = selected_item.text()
+
         self.table.setSortingEnabled(False)
-        self.table.setRowCount(len(shown))
-        for row, drawing in enumerate(shown):
-            identity_item = QTableWidgetItem(drawing.identity)
-            self.table.setItem(row, 0, identity_item)
-            type_item = QTableWidgetItem(drawing.drawing_type)
-            type_item.setTextAlignment(Qt.AlignCenter)
-            self.table.setItem(row, 1, type_item)
-            for offset, key in enumerate(TABLE_STAGES, start=2):
-                text = drawing.statuses.get(key, "—")
-                item = QTableWidgetItem(text)
-                item.setTextAlignment(Qt.AlignCenter)
-                self.table.setItem(row, offset, item)
-            issue_item = QTableWidgetItem(str(len(drawing.issues)) if drawing.issues else "")
-            issue_item.setTextAlignment(Qt.AlignCenter)
-            if drawing.issues:
-                issue_item.setForeground(QColor(TONE_COLORS["bad"]))
-                issue_item.setToolTip("\n".join(drawing.issues))
-            self.table.setItem(row, len(TABLE_STAGES) + 2, issue_item)
+        self.table.setUpdatesEnabled(False)
+        try:
+            self.table.setRowCount(len(shown))
+            for row, drawing in enumerate(shown):
+                identity_item = QTableWidgetItem(drawing.identity)
+                self.table.setItem(row, 0, identity_item)
+                type_item = QTableWidgetItem(drawing.drawing_type)
+                type_item.setTextAlignment(Qt.AlignCenter)
+                self.table.setItem(row, 1, type_item)
+                for offset, key in enumerate(TABLE_STAGES, start=2):
+                    text = drawing.statuses.get(key, "—")
+                    item = QTableWidgetItem(text)
+                    item.setTextAlignment(Qt.AlignCenter)
+                    self.table.setItem(row, offset, item)
+                issue_item = QTableWidgetItem(
+                    str(len(drawing.issues)) if drawing.issues else ""
+                )
+                issue_item.setTextAlignment(Qt.AlignCenter)
+                if drawing.issues:
+                    issue_item.setForeground(QColor(TONE_COLORS["bad"]))
+                    issue_item.setToolTip("\n".join(drawing.issues))
+                self.table.setItem(row, len(TABLE_STAGES) + 2, issue_item)
+        finally:
+            self.table.setUpdatesEnabled(True)
+
+        restored = False
+        if selected_identity is not None:
+            model = self.table.model()
+            for row in range(self.table.rowCount()):
+                item = self.table.item(row, 0)
+                if item is not None and item.text() == selected_identity:
+                    index = model.index(row, 0)
+                    # Set the selection directly: selectRow() scrolls the new
+                    # row into view and would overwrite the preserved offset.
+                    flags = QItemSelectionModel.Select | QItemSelectionModel.Rows
+                    self.table.selectionModel().select(index, flags)
+                    self.table.selectionModel().setCurrentIndex(
+                        index, QItemSelectionModel.NoUpdate
+                    )
+                    restored = True
+                    break
+        if not restored:
+            self.table.clearSelection()
 
         header_height = self.table.horizontalHeader().sizeHint().height()
         row_height = self.table.verticalHeader().defaultSectionSize()
         table_height = header_height + max(1, len(shown)) * row_height + 14
         self.table.setFixedHeight(min(360, max(130, table_height)))
+        self.table.verticalScrollBar().setValue(scroll_value)

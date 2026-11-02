@@ -474,6 +474,58 @@ class DashboardWidgetTests(unittest.TestCase):
         self.assertIn("No blocking issues found.", empty)
         self.assertEqual(dashboard.evidence.toggle.text(), "Show evidence files (9)")
 
+    def test_matrix_never_uses_content_sized_columns(self):
+        """ResizeToContents measured every row on every insert (20-45 s stall)."""
+
+        from PySide6.QtWidgets import QHeaderView
+
+        write_complete_reports(self.reports)
+        dashboard = self._dashboard()
+        dashboard.refresh(self.reports)
+
+        header = dashboard.table.horizontalHeader()
+        self.assertEqual(header.sectionResizeMode(0), QHeaderView.Stretch)
+        for column in range(dashboard.table.columnCount()):
+            self.assertNotEqual(
+                header.sectionResizeMode(column),
+                QHeaderView.ResizeToContents,
+                f"matrix column {column} must not measure every row",
+            )
+
+    def test_refresh_keeps_selection_and_scroll(self):
+        from reporting.dashboard_data import DrawingStatus, Snapshot
+
+        dashboard = self._dashboard()
+        dashboard.resize(1200, 800)
+        dashboard.show()
+        self.app.processEvents()
+
+        drawings = tuple(
+            DrawingStatus(identity=f"D{index:04d}", drawing_type="SP")
+            for index in range(200)
+        )
+        dashboard._snapshot = Snapshot(root=Path("/reports"), drawings=drawings)
+        dashboard._apply(dashboard._snapshot)
+        self.app.processEvents()
+
+        dashboard.table.selectRow(40)
+        expected_identity = dashboard.table.item(40, 0).text()
+
+        # Scroll away AFTER selecting: selectRow() pulls its row into view, so
+        # this is the offset a refresh must not lose.
+        scroll = dashboard.table.verticalScrollBar()
+        scroll.setValue(scroll.maximum() // 2)
+        expected_scroll = scroll.value()
+        self.assertGreater(expected_scroll, 0)
+
+        dashboard._render_table()
+
+        self.assertEqual(
+            dashboard.table.item(dashboard.table.currentRow(), 0).text(),
+            expected_identity,
+        )
+        self.assertEqual(scroll.value(), expected_scroll)
+
     def test_issues_filter_narrows_the_matrix(self):
         write_complete_reports(self.reports, writer_issue=True)
         dashboard = self._dashboard()
@@ -556,6 +608,31 @@ class MainIntegrationTests(unittest.TestCase):
                 self.assertEqual(main.rtbl.rowCount(), 9)
                 self.assertEqual(main.dashboard.evidence.toggle.text(),
                                  "Show evidence files (9)")
+            finally:
+                main.close()
+                main.deleteLater()
+
+    def test_repeat_refresh_with_unchanged_reports_is_a_no_op(self):
+        import app as legacy
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            reports = root / "BUNDLE" / "_GNI_REPORTS"
+            write_complete_reports(reports)
+            main = legacy.Main()
+            try:
+                main.dst.setText(str(root))
+                main.bundle.setText("BUNDLE")
+                main.refresh_reports()
+                first = main.dashboard._snapshot
+                main.refresh_reports()
+                self.assertIs(main.dashboard._snapshot, first)
+
+                (reports / "pdf_publish_report.json").write_text(
+                    "{}", encoding="utf-8"
+                )
+                main.refresh_reports()
+                self.assertIsNot(main.dashboard._snapshot, first)
             finally:
                 main.close()
                 main.deleteLater()

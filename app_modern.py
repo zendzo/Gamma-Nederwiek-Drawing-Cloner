@@ -149,6 +149,11 @@ QTextEdit, QPlainTextEdit, QListWidget, QTableWidget {
     selection-background-color: #DBEAFE;
     selection-color: #1E3A8A;
 }
+QComboBox#recentJobs {
+    min-width: 260px;
+    min-height: 38px;
+    font-weight: 600;
+}
 QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus,
 QTextEdit:focus, QPlainTextEdit:focus, QTableWidget:focus {
     border: 1px solid #2563EB;
@@ -414,6 +419,12 @@ class ModernMain(legacy.Main):
         self.setWindowTitle(f"{APP_TITLE} - {APP_SUBTITLE}")
         self.setMinimumSize(1180, 720)
         self.resize(1540, 900)
+        # Reports are loaded on the next event-loop turn, never inside the
+        # navigation click: the page switch must paint before the snapshot
+        # work starts.  single-shot, so rapid clicks coalesce into one refresh.
+        self._reports_timer = QTimer(self)
+        self._reports_timer.setSingleShot(True)
+        self._reports_timer.timeout.connect(self.refresh_reports)
         self._install_modern_shell()
         self._apply_widget_roles()
         # Apply QSS only after all objectName roles have been assigned.
@@ -557,7 +568,15 @@ class ModernMain(legacy.Main):
         self.modern_page_title.setText(title)
         self.modern_page_subtitle.setText(PAGE_DESCRIPTIONS.get(title, ""))
         if title == "Reports":
-            self.refresh_reports()
+            # Defer the data load by one event-loop turn.  `refresh_reports`
+            # itself is a no-op when the reports folder is unchanged, so a
+            # revisit costs nothing; the deferral keeps the first visit from
+            # blocking the sidebar transition.
+            self._reports_timer.start(0)
+        else:
+            # Do not pay for a Reports build after the operator has already
+            # navigated somewhere else.
+            self._reports_timer.stop()
 
     def show_reports_tab(self) -> None:
         """Bring the Reports page forward in the sidebar shell.
@@ -585,10 +604,18 @@ class ModernMain(legacy.Main):
             self.newjobb.setObjectName("secondaryButton")
         # The QSS targets QSpinBox#workerInput / QLabel#workerLabel; without these
         # object names the worker controls fell back to the default Fusion look.
+        # `Batch size` sits next to `Parallel workers` and must look identical, so
+        # it shares the same object name (selectors match on the name, not on a
+        # unique widget).
         if hasattr(self, "workers"):
             self.workers.setObjectName("workerInput")
+        if hasattr(self, "batch"):
+            self.batch.setObjectName("workerInput")
         if hasattr(self, "adv"):
             self.adv.setObjectName("advancedGroup")
+        if hasattr(self, "recent"):
+            self.recent.setObjectName("recentJobs")
+            self.recent.setMinimumHeight(38)
         for line_edit in self.findChildren(legacy.QLineEdit):
             line_edit.setMinimumHeight(38)
             line_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -600,7 +627,7 @@ class ModernMain(legacy.Main):
             self.adv.setVisible(True)
             self.adv.setMinimumHeight(82)
         for widget in self.findChildren(QLabel):
-            if widget.text().strip() == "Parallel workers":
+            if widget.text().strip() in ("Parallel workers", "Batch size"):
                 widget.setObjectName("workerLabel")
         for widget in self.findChildren(QPushButton):
             text = widget.text().strip().lower()

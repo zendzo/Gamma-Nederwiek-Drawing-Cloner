@@ -10,7 +10,7 @@ import re
 
 from revision import adaptive_detection as adaptive
 
-PATCH_VERSION = "0.4C.2F.1-row00-recovery-manual-report"
+PATCH_VERSION = "0.4C.28-row-a-recovery"
 
 
 def _norm(value):
@@ -144,6 +144,53 @@ def _reconstruct_00(owner, identity, drawing_type, rows, detected):
     return recovered, "ROW00_RECONSTRUCTED_FROM_NUMERIC_AFC:" + source["revision"]
 
 
+def _reconstruct_a(identity, drawing_type, detected):
+    """Rebuild a missing A row from the current 00 row.
+
+    Most SP title blocks carry a single revision row: the drawing sits at 00
+    (approved for construction) and was never issued for comments, so there is
+    no A row to write into and the plan used to block. Both deliverables are
+    built from the same highest-revision geometry, so each output can carry its
+    own revision in that one row - the A copy writes A/issued-for-comments, the
+    00 copy keeps 00/approved-for-construction. The reuse is declared in the
+    evidence and in a plan warning; nothing is silently promoted.
+    """
+    if any(item["revision"] == "A" for item in detected):
+        return None, ""
+    row_00 = next(
+        (item for item in detected
+         if item["revision"] == "00" and item["confidence"] == "HIGH"),
+        None,
+    )
+    if not row_00:
+        return None, "A_ROW_RECOVERY_REJECTED:NO_HIGH_CONFIDENCE_00"
+    cells = row_00["cells"]
+    revision_cell = cells.get("REVISION")
+    date_cell = cells.get("REVISION_DATE")
+    if not revision_cell or not str(revision_cell.get("handle", "")).strip():
+        return None, "A_ROW_RECOVERY_REJECTED:NO_REVISION_HANDLE"
+    if not date_cell or not str(date_cell.get("handle", "")).strip():
+        return None, "A_ROW_RECOVERY_REJECTED:NO_DATE_HANDLE"
+    recovered = {
+        "identity": identity,
+        "drawing_type": drawing_type,
+        "revision": "A",
+        "row_y": row_00["row_y"],
+        "header_y": row_00["header_y"],
+        "confidence": "HIGH",
+        "confidence_score": 90,
+        "evidence": ";".join([
+            "RECONSTRUCTED_ROW_A",
+            "SOURCE_ROW_00",
+            "HIGH_CONFIDENCE_00_ANCHOR",
+            "SHARED_HANDLE_WITH_00",
+        ]),
+        "cells": cells,
+        "all_cells": [dict(item) for item in row_00["all_cells"]],
+    }
+    return recovered, "A_ROW_RECONSTRUCTED_FROM_00"
+
+
 def detect_with_recovery(owner, identity, drawing_type, rows):
     detected, warnings = adaptive.detect_detailed_rows(owner, identity, drawing_type, rows)
     recovered, diagnostic = _reconstruct_00(owner, identity, drawing_type, rows, detected)
@@ -153,6 +200,13 @@ def detect_with_recovery(owner, identity, drawing_type, rows):
         warnings.append(diagnostic)
     elif diagnostic:
         warnings.append(diagnostic)
+    recovered_a, diagnostic_a = _reconstruct_a(identity, drawing_type, detected)
+    if recovered_a:
+        detected.append(recovered_a)
+        warnings = [item for item in warnings if item != "SPATIAL_ROW_NOT_FOUND:A"]
+        warnings.append(diagnostic_a)
+    elif diagnostic_a:
+        warnings.append(diagnostic_a)
     return detected, warnings
 
 

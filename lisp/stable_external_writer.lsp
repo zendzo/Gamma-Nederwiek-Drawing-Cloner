@@ -155,7 +155,93 @@
           (GNI:ROW resultStream (list sequence handle targetField mode "FAILED" "UNKNOWN_ACTION_MODE" actualValue actualLayer))
           nil)))))
 
-(defun GNI:RUN-EXTERNAL-WRITER (mode actionPath resultPath targetLayer targetColor / actions resultStream passed failed action saveResult)
+;; --- Reference-raster normalization ---------------------------------------
+;; The packaged Tennet logo is 1136x305 px, but older Gamma drawings stored a
+;; 922x260 image definition and sized the entity for that. AutoCAD renders a
+;; raster at the *file's* pixel size, so once the 1136x305 PNG sits next to the
+;; DWG the logo grows ~23% and overlaps the SEAtrium logo. Rescale u/v vectors
+;; and rewrite the IMAGEDEF so the drawn footprint is preserved.
+(defun GNI:BASENAME (path / result pos)
+  (setq result path)
+  (while (setq pos (vl-string-search "/" result))
+    (setq result (substr result (+ pos 2))))
+  (while (setq pos (vl-string-search "\\" result))
+    (setq result (substr result (+ pos 2))))
+  result)
+
+(defun GNI:READ-RASTER-MAP (path / stream line fields result w h)
+  (setq result '())
+  (if (and path (/= path ""))
+    (progn
+      (setq stream (open path "r"))
+      (if stream
+        (progn
+          (while (setq line (read-line stream))
+            (setq fields (GNI:SPLIT-TAB line))
+            (if (and (nth 0 fields) (nth 1 fields) (nth 2 fields))
+              (progn
+                (setq w (atoi (nth 1 fields)))
+                (setq h (atoi (nth 2 fields)))
+                (if (and (> w 0) (> h 0))
+                  (setq result (cons (cons (nth 0 fields) (list w h)) result))))))
+          (close stream)))))
+  result)
+
+(defun GNI:SCALE-UNIFORM (vec s)
+  (list (* (float (car vec)) s) (* (float (cadr vec)) s) (float (caddr vec))))
+
+(defun GNI:CHECK-ONE-IMAGE (en map / ed def dd path name pair aw ah sw sh sx sy)
+  (setq ed (entget en))
+  (setq def (cdr (assoc 340 ed)))
+  (if (null def) (setq def (cdr (assoc 360 ed))))
+  (if def
+    (progn
+      (setq dd (entget def))
+      (setq path (cdr (assoc 1 dd)))
+      (setq name (GNI:BASENAME path))
+      (setq pair (assoc name map))
+      (if pair
+        (progn
+          (setq aw (car (cdr pair)))
+          (setq ah (cadr (cdr pair)))
+          (setq sw (fix (car (cdr (assoc 10 dd)))))
+          (setq sh (fix (cadr (cdr (assoc 10 dd)))))
+          (if (and (> aw 0) (> ah 0) (> sw 0) (> sh 0)
+                   (or (/= aw sw) (/= ah sh)))
+            (progn
+              (setq sx (/ (float sw) (float aw)))
+              (setq sy (/ (float sh) (float ah)))
+              (setq ed (subst (cons 11 (GNI:SCALE-UNIFORM (cdr (assoc 11 ed)) sx)) (assoc 11 ed) ed))
+              (setq ed (subst (cons 12 (GNI:SCALE-UNIFORM (cdr (assoc 12 ed)) sy)) (assoc 12 ed) ed))
+              (setq ed (subst (list 13 (float aw) (float ah) 0.0) (assoc 13 ed) ed))
+              (setq dd (subst (list 10 (float aw) (float ah) 0.0) (assoc 10 dd) dd))
+              (setq dd (subst (list 11 (/ 1.0 (float aw)) (/ 1.0 (float aw)) 0.0) (assoc 11 dd) dd))
+              (vl-catch-all-apply 'entmod (list dd))
+              (vl-catch-all-apply 'entmod (list ed))
+              (vl-catch-all-apply 'entupd (list en))
+              T)
+            nil))
+        nil))
+    nil))
+
+(defun GNI:NORMALIZE-RASTERS (mapPath / map ss n i en changed)
+  (setq changed 0)
+  (setq map (GNI:READ-RASTER-MAP mapPath))
+  (if map
+    (progn
+      (setq ss (ssget "X" '((0 . "IMAGE"))))
+      (if ss
+        (progn
+          (setq n (sslength ss))
+          (setq i 0)
+          (while (< i n)
+            (setq en (ssname ss i))
+            (if (GNI:CHECK-ONE-IMAGE en map)
+              (setq changed (1+ changed)))
+            (setq i (1+ i)))))))
+  changed)
+
+(defun GNI:RUN-EXTERNAL-WRITER (mode actionPath resultPath targetLayer targetColor rasterMapPath / actions resultStream passed failed action saveResult normalized)
   (setq passed 0 failed 0)
   (if (not (GNI:PREPARE-LAYER targetLayer targetColor))
     (princ "\nGNI_STABLE_EXTERNAL_WRITER_FAILED:LAYER_PREPARE_FAILED")
@@ -181,6 +267,11 @@
                     ":PASSED=" (itoa passed)
                     ":FAILED=" (itoa failed)))
                 (progn
+                  ;; Raster normalization must run before QSAVE so the saved
+                  ;; (and later published) DWG keeps its original logo footprint.
+                  (setq normalized (GNI:NORMALIZE-RASTERS rasterMapPath))
+                  (if (and normalized (> normalized 0))
+                    (princ (strcat "\nGNI_RASTERS_NORMALIZED=" (itoa normalized))))
                   (setq saveResult (vl-catch-all-apply 'command-s (list "_.QSAVE")))
                   (if (vl-catch-all-error-p saveResult)
                     (princ

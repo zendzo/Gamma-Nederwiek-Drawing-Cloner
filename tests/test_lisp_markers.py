@@ -114,6 +114,15 @@ class LispFileTests(unittest.TestCase):
                     with self.subTest(file=path.name, line=line.strip()[:60]):
                         self.fail("Windows-style path in LISP literal")
 
+    def test_pdf_plotter_forces_imageframe_off_for_logo_rasters(self):
+        # Raster logos must plot without a frame border; the plotter toggles
+        # IMAGEFRAME 1 -> 0 because a lone setvar to 0 is ignored by -PLOT.
+        text = (LISP_DIR / "pdf_modelspace_plotter.lsp").read_text(
+            encoding="utf-8", errors="replace"
+        )
+        self.assertIn('(setvar "IMAGEFRAME" 1)', text)
+        self.assertIn('(setvar "IMAGEFRAME" 0)', text)
+
 
 if __name__ == "__main__":
     unittest.main()

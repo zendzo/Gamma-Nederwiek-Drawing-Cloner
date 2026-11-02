@@ -9,10 +9,11 @@ import tempfile
 import uuid
 from typing import Dict, List
 
+from runtime.batching import clamp_batch_size, run_batched
+from runtime.atomic_io import atomic_replace
 from runtime.hashing import sha256_file
-from runtime.parallel import run_pool
 
-DRY_RUN_VERSION = "0.4C.2A-atomic-publisher-dry-run"
+DRY_RUN_VERSION = "0.4C.26-batched-atomic-publisher-dry-run"
 
 
 class AtomicPublishDryRunError(RuntimeError):
@@ -375,15 +376,24 @@ class AtomicPublisherDryRun:
         )
         return result
 
-    def inspect_many(self, pairs, workers=1, on_result=None, should_cancel=None):
+    def inspect_batch(self, pairs):
+        """Inspect a batch sequentially on one pool thread (no Core Console)."""
+        return [self.inspect_pair(pair) for pair in pairs]
+
+    def inspect_many(self, pairs, workers=1, on_result=None, should_cancel=None,
+                     batch_size=1):
         """Inspect pairs, optionally in parallel, returning them in input order.
 
         Same contract as the writer/validator/PDF engines: ``on_result`` fires in
         completion order, the returned list is re-sorted into plan order, and
-        ``should_cancel`` stops the pool between pairs.
+        ``should_cancel`` stops the pool between batches. ``batch_size`` groups
+        pairs per pool task so a 700-drawing bundle does not keep one hashing
+        job per pair in flight at once.
         """
-        return run_pool(
-            self.inspect_pair, pairs, workers, on_result, should_cancel
+        return run_batched(
+            self.inspect_pair, self.inspect_batch, pairs,
+            batch_size=clamp_batch_size(batch_size, default=1), workers=workers,
+            on_result=on_result, should_cancel=should_cancel,
         )
 
     @staticmethod
@@ -423,5 +433,5 @@ class AtomicPublisherDryRun:
         temporary.write_text(
             json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
         )
-        os.replace(temporary, path)
+        atomic_replace(temporary, path)
         return path

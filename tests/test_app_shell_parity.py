@@ -167,11 +167,48 @@ class ModernReportsNavigationTests(unittest.TestCase):
             self.assertEqual(main.page_stack.currentIndex(), reports)
             self.assertTrue(main.nav_buttons[reports].isChecked())
             self.assertEqual(main.modern_page_title.text(), "Reports")
+            # The snapshot/table work must happen after the page paints, so one
+            # refresh is queued instead of blocking the navigation click.
+            self.assertTrue(main._reports_timer.isActive())
+            main._reports_timer.stop()
         finally:
             main.close()
             main.deleteLater()
 
 
+class WorkerControlStyleTests(unittest.TestCase):
+    """`Batch size` must be styled exactly like `Parallel workers`.
+
+    Both controls sit in the same row and do the same job for the same levers;
+    a missing object name silently fell them back to the default Fusion look.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_batch_size_shares_the_worker_style(self):
+        if app_modern is None:  # pragma: no cover
+            self.skipTest("app_modern unavailable")
+        main = app_modern.ModernMain()
+        try:
+            self.assertEqual(main.batch.objectName(), "workerInput")
+            self.assertEqual(main.workers.objectName(), main.batch.objectName())
+            # The stylesheet rule must actually exist, otherwise the name is
+            # only cosmetic.
+            self.assertIn("QSpinBox#workerInput", app_modern.MODERN_QSS)
+            matching = [
+                widget for widget in main.findChildren(legacy.QLabel)
+                if widget.text().strip() in ("Batch size", "Parallel workers")
+            ]
+            self.assertEqual(len(matching), 2, matching)
+            self.assertEqual({widget.objectName() for widget in matching},
+                             {"workerLabel"})
+        finally:
+            main.close()
+            main.deleteLater()
 def _mean_rgb(image):
     """Average colour of the visible pixels, or None when fully transparent."""
     total = count = 0

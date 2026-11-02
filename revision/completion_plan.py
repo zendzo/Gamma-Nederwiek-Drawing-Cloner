@@ -118,6 +118,12 @@ class TitleBlockCompletionPlanBuilder(NoDonorRevisionCleanupPlanBuilder):
         if not a_row or not getattr(a_row, "date_handle", ""):
             plan.errors.append("A_HISTORY_DATE_HANDLE_MISSING")
             return
+        # A reconstructed A row shares the 00 row's cells (single-row SP tables).
+        # Writing the A history date into output 00 would then target the same
+        # handle as the 00 revision date and the two writes would fight.
+        if "RECONSTRUCTED_ROW_A" in str(getattr(a_row, "evidence", "") or ""):
+            plan.warnings.append("A_HISTORY_DATE_SKIPPED:ROW_A_SHARES_ROW_00")
+            return
         source = next(
             (row for row in rows if row.get("handle") == a_row.date_handle), None
         )
