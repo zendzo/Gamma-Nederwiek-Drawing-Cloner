@@ -129,7 +129,7 @@
           (setq total (+ total (GNI:PROCESS-ENTITY resultStream entity replacements)))))))
   total)
 
-(defun GNI:RUN-GENERAL-CLONE (replacementPath resultPath / parsed ok replacements stream layout total status saveResult)
+(defun GNI:RUN-GENERAL-CLONE-BODY (replacementPath resultPath / parsed ok replacements stream layout total status saveResult)
   (setq *GNI:REPLACE-COUNT* 0)
   (setq *GNI:WRITE-FAILURES* 0)
   (setq parsed (GNI:READ-REPLACEMENTS replacementPath))
@@ -176,6 +176,23 @@
                   (strcat "\nGNI_GENERAL_CLONER_OK:REPLACEMENTS="
                     (itoa total)))))))))
   (princ)))
+
+(defun GNI:RUN-GENERAL-CLONE (replacementPath resultPath expectedName / current wrongStream)
+  (setq current (vl-filename-base (getvar "DWGNAME")))
+  (if (null current) (setq current ""))
+  (if (and expectedName (/= expectedName "")
+           (/= (strcase current) (strcase (vl-filename-base expectedName))))
+    (progn
+      (setq wrongStream (open resultPath "w"))
+      (if wrongStream
+        (progn
+          (GNI:ROW wrongStream
+            '("Handle" "Entity Type" "Old Value" "New Value" "Replacements" "Status"))
+          (GNI:ROW wrongStream (list "" "" "" "" 0 "WRONG_DRAWING"))
+          (close wrongStream)))
+      (princ (strcat "\nGNI_GENERAL_CLONER_FAILED:WRONG_DRAWING:" current)))
+    (GNI:RUN-GENERAL-CLONE-BODY replacementPath resultPath))
+  (princ))
 
 (princ "\nGNI_GENERAL_CLONER_0_5_0_LOADED")
 (princ)

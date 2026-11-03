@@ -306,6 +306,25 @@ class GeneralClonerEngineTests(unittest.TestCase):
         self.assertEqual(results[0].status, "FAILED")
         self.assertIn("GENERAL_WRITE_FAILED", results[0].error)
 
+    def test_wrong_drawing_status_is_a_failure(self):
+        self.write("plan.dwg")
+
+        def wrong_drawing_runner(*, job, working_dwg, config_path, result_path):
+            Path(result_path).write_text(
+                "Handle\tEntity Type\tOld Value\tNew Value\tReplacements\tStatus\n"
+                "\t\t\t\t0\tWRONG_DRAWING\n",
+                encoding="utf-8",
+            )
+            return SimpleNamespace(
+                returncode=0,
+                stdout=GeneralClonerEngine.LOAD_MARKER,
+                stderr="",
+            )
+
+        results, _, _, _ = self.engine(runner=wrong_drawing_runner).run()
+        self.assertEqual(results[0].status, "FAILED")
+        self.assertIn("WRONG_DRAWING", results[0].error)
+
     def test_source_validation_rejects_a_missing_folder(self):
         engine = self.engine()
         missing = self.root / "missing"
@@ -336,6 +355,12 @@ class GeneralClonerEngineTests(unittest.TestCase):
         self.assertIn("MODE=GENERAL_CLONER", text)
         self.assertIn("DISCOVERED=1", text)
         self.assertIn("SUMMARY", text)
+
+    def test_call_line_passes_the_expected_working_filename(self):
+        engine = self.engine()
+        line = engine._call_line(Path("c.tsv"), Path("r.tsv"), Path("work_abc123.dwg"))
+        self.assertIn('"work_abc123.dwg"', line)
+        self.assertIn("GNI:RUN-GENERAL-CLONE", line)
 
     def test_long_source_and_destination_paths_are_processed(self):
         if os.name != "nt":
@@ -448,6 +473,7 @@ class GeneralClonerLispContractTests(unittest.TestCase):
         self.assertIn("(= (car pair) 1)", text)
         self.assertIn("(= (car pair) 3)", text)
         self.assertIn("TEXT,MTEXT,ATTRIB,ATTDEF", text)
+        self.assertIn("WRONG_DRAWING", text)
 
 
 class StructuralRegressionTests(unittest.TestCase):

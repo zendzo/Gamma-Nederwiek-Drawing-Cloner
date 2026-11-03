@@ -343,10 +343,11 @@ class GeneralClonerEngine:
             f'(load "{self._scr_path(self.runtime_lisp)}")',
         ]
 
-    def _call_line(self, config: Path, result_tsv: Path) -> str:
+    def _call_line(self, config: Path, result_tsv: Path, working: Path) -> str:
+        expected = Path(working).name.replace('"', '\\"')
         return (
             f'(GNI:RUN-GENERAL-CLONE "{self._scr_path(config)}" '
-            f'"{self._scr_path(result_tsv)}")'
+            f'"{self._scr_path(result_tsv)}" "{expected}")'
         )
 
     @staticmethod
@@ -402,7 +403,7 @@ class GeneralClonerEngine:
         script = staged.job / "general_cloner.scr"
         lines = [
             *self._script_header(),
-            self._call_line(staged.config, staged.result_tsv),
+            self._call_line(staged.config, staged.result_tsv, staged.working),
             "_.QUIT",
             "_Y",
             "",
@@ -443,7 +444,7 @@ class GeneralClonerEngine:
         total = 0
         for row in rows:
             status = str(row.get("Status") or "").strip().upper()
-            if status in ("FAILED", "QSAVE_FAILED"):
+            if status in ("FAILED", "QSAVE_FAILED", "WRONG_DRAWING"):
                 raise GeneralClonerError("GENERAL_WRITE_FAILED:" + status)
         # The LISP writes one row per changed entity plus a summary row.  Sum
         # only the per-entity rows when they exist, otherwise a summary-only
@@ -542,7 +543,7 @@ class GeneralClonerEngine:
                 else self._new_job(drawing.relative_path)
             )
             job.mkdir(parents=True, exist_ok=True)
-            working = job / "working.dwg"
+            working = job / ("work_" + uuid.uuid4().hex[:8] + ".dwg")
             result_tsv = job / "result.tsv"
             log = job / "clone.log"
             config = (batch_root / "replacements.tsv") if batch_root is not None else (job / "replacements.tsv")
@@ -667,7 +668,7 @@ class GeneralClonerEngine:
                         *self._script_header(),
                     ]
                 )
-            lines.append(self._call_line(staged.config, staged.result_tsv))
+            lines.append(self._call_line(staged.config, staged.result_tsv, staged.working))
         lines.extend([self._dirty_guard(), "_.QUIT", "_Y", ""])
         script.write_text("\n".join(lines), encoding="ascii", errors="replace")
         try:
