@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -28,6 +29,7 @@ from general.constants import GENERAL_MODE, STRUCTURAL_MODE
 from general.scanner import GeneralDrawing
 from models import SourceFile
 from scanner.universal import Scanner
+from runtime.winpath import long_path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -69,7 +71,7 @@ def fake_runner(fail_name=None, force_failure=False, marker=True):
     """Return a process runner that rewrites the staged DWG and writes a TSV."""
 
     def run(*, job, working_dwg, config_path, result_path):
-        if fail_name and fail_name in str(job):
+        if fail_name and Path(fail_name).stem in str(job):
             raise RuntimeError("simulated per-file failure")
         pairs = _read_pairs(config_path)
         data, count = _replace_bytes(Path(working_dwg).read_bytes(), pairs)
@@ -99,7 +101,12 @@ class GeneralClonerEngineTests(unittest.TestCase):
         self.bundle = "BUNDLE"
 
     def tearDown(self):
-        self.tmp.cleanup()
+        try:
+            self.tmp.cleanup()
+        except OSError:
+            # The long-path regression test intentionally creates a tree beyond
+            # MAX_PATH; tempfile's plain rmtree cannot remove it.
+            shutil.rmtree(long_path(self.tmp.name), ignore_errors=True)
 
     def engine(self, *, policy="BACKUP_OVERWRITE", runner=None, mapping=None):
         return GeneralClonerEngine(
@@ -330,6 +337,31 @@ class GeneralClonerEngineTests(unittest.TestCase):
         self.assertIn("DISCOVERED=1", text)
         self.assertIn("SUMMARY", text)
 
+    def test_long_source_and_destination_paths_are_processed(self):
+        if os.name != "nt":
+            self.skipTest("Windows MAX_PATH regression")
+        deep = self.source
+        for index in range(8):
+            deep = deep / ("very_long_folder_name_%02d" % index)
+        long_path(deep).mkdir(parents=True, exist_ok=True)
+        name = ("A" * 120) + ".dwg"
+        source = deep / name
+        long_path(source).write_bytes(b"Project IJMUIDEN VER GAMMA")
+        self.assertGreater(len(str(source)), 260)
+
+        captured = {}
+
+        def runner(**kwargs):
+            captured["job"] = str(kwargs["job"])
+            return fake_runner()(**kwargs)
+
+        results, report, _, _ = self.engine(runner=runner).run()
+        self.assertEqual(results[0].status, "SUCCESS", results[0].error)
+        self.assertLess(len(captured["job"]), 200)
+        destination = self.destination / self.bundle / Path(source).relative_to(self.source)
+        self.assertTrue(long_path(destination).is_file())
+        self.assertEqual(long_path(source).read_bytes(), b"Project IJMUIDEN VER GAMMA")
+
 
 class GeneralWorkerTests(unittest.TestCase):
     """The QThread adapter must forward every payload key to the engine."""
@@ -388,6 +420,16 @@ class GeneralWorkerTests(unittest.TestCase):
         self.assertIn("should_cancel", captured["run"])
         self.assertIn("on_progress", captured["run"])
         self.assertIn("on_log", captured["run"])
+
+
+class WinPathTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "Windows extended paths only")
+    def test_local_and_unc_paths_are_prefixed(self):
+        local = str(long_path(r"C:\Temp\x.dwg"))
+        unc = str(long_path(r"\\server\share\x.dwg"))
+        self.assertTrue(local.startswith("\\\\?\\C:\\"), local)
+        self.assertTrue(unc.startswith("\\\\?\\UNC\\server\\share"), unc)
+        self.assertEqual(str(long_path(local)), local)
 
 
 class GeneralClonerLispContractTests(unittest.TestCase):

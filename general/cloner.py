@@ -45,6 +45,7 @@ from runtime.batching import clamp_batch_size, run_batched
 from runtime.console_text import decode_console
 from runtime.hashing import sha256_file
 from runtime.process_tracking import run_console
+from runtime.winpath import long_path
 
 GENERAL_CLONER_VERSION = "0.5.0-general-cloner"
 GENERAL_REPORT_NAME = "general_cloner_report.json"
@@ -234,11 +235,13 @@ class GeneralClonerEngine:
 
     @staticmethod
     def _atomic_copy(source: Path, destination: Path):
-        source = Path(source)
-        destination = Path(destination)
+        source = long_path(source)
+        destination = long_path(destination)
         destination.parent.mkdir(parents=True, exist_ok=True)
+        # A short temporary name keeps the copy working even when the final
+        # drawing name is already close to the 255-character component limit.
         temporary = destination.with_name(
-            destination.name + ".gni-copying-" + uuid.uuid4().hex[:8]
+            ".gni-" + uuid.uuid4().hex[:8] + destination.suffix
         )
         try:
             with source.open("rb", buffering=0) as src, temporary.open(
@@ -271,11 +274,16 @@ class GeneralClonerEngine:
             for char in str(value)
         )[:80]
 
+    def _job_slug(self, value) -> str:
+        """Short, ASCII-only job name; long names are what broke result paths."""
+        text = self._safe(Path(str(value)).stem) or "job"
+        return text[:24]
+
     def _new_job(self, name) -> Path:
         for _ in range(64):
             job = self.job_root / (
                 datetime.now().strftime("%Y%m%d_%H%M%S_")
-                + self._safe(name)
+                + self._job_slug(name)
                 + "_"
                 + uuid.uuid4().hex[:8]
             )
@@ -453,7 +461,7 @@ class GeneralClonerEngine:
         relative = destination.relative_to(self.bundle_root)
         backup = self.backup_root / stamp / relative
         self._atomic_copy(destination, backup)
-        if self._sha256(destination) != self._sha256(backup):
+        if self._sha256(long_path(destination)) != self._sha256(long_path(backup)):
             raise OSError("Backup hash verification failed")
         return backup
 
@@ -464,7 +472,7 @@ class GeneralClonerEngine:
             candidate = destination.with_name(
                 f"{destination.stem}_COPY_{counter:02d}{destination.suffix}"
             )
-            if not candidate.exists():
+            if not long_path(candidate).exists():
                 return candidate
             counter += 1
 
@@ -472,14 +480,15 @@ class GeneralClonerEngine:
         result = staged.result
         working = Path(staged.working)
         destination = Path(result.destination_path)
-        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination_io = long_path(destination)
+        destination_io.parent.mkdir(parents=True, exist_ok=True)
 
-        output_sha = self._sha256(working)
+        output_sha = self._sha256(long_path(working))
         result.output_sha256 = output_sha
         action = "COPY_NEW"
 
-        if destination.is_file():
-            destination_sha = self._sha256(destination)
+        if destination_io.is_file():
+            destination_sha = self._sha256(destination_io)
             if destination_sha == output_sha:
                 result.status = "SKIPPED"
                 result.action = "SKIP_IDENTICAL"
@@ -501,9 +510,9 @@ class GeneralClonerEngine:
                 action = "BACKUP_OVERWRITE"
 
         self._atomic_copy(working, destination)
-        if destination.stat().st_size != working.stat().st_size:
+        if long_path(destination).stat().st_size != long_path(working).stat().st_size:
             raise OSError("Destination size verification failed")
-        destination_sha = self._sha256(destination)
+        destination_sha = self._sha256(long_path(destination))
         if destination_sha != output_sha:
             raise OSError("Destination hash verification failed")
         result.destination_sha256 = destination_sha
@@ -528,7 +537,7 @@ class GeneralClonerEngine:
         job = None
         try:
             job = (
-                batch_root / (self._safe(drawing.relative_path) + "_" + uuid.uuid4().hex[:6])
+                batch_root / (self._job_slug(drawing.relative_path) + "_" + uuid.uuid4().hex[:6])
                 if batch_root is not None
                 else self._new_job(drawing.relative_path)
             )
@@ -539,12 +548,13 @@ class GeneralClonerEngine:
             config = (batch_root / "replacements.tsv") if batch_root is not None else (job / "replacements.tsv")
             self._write_config(config)
             source = Path(drawing.source_path)
-            if not source.is_file():
+            source_io = long_path(source)
+            if not source_io.is_file():
                 raise FileNotFoundError("Source file not found: " + str(source))
-            if source.stat().st_size <= 0:
+            if source_io.stat().st_size <= 0:
                 raise OSError("Source file is empty: " + str(source))
-            result.source_sha256 = self._sha256(source)
-            self._atomic_copy(source, working)
+            result.source_sha256 = self._sha256(source_io)
+            self._atomic_copy(source_io, working)
             return _Staged(
                 drawing, result, job, working, config, result_tsv, log, started
             )

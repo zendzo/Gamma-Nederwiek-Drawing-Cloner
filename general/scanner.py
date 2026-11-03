@@ -12,6 +12,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List
+import os
+
+from runtime.winpath import long_path
 
 DWG_EXTENSION = ".dwg"
 
@@ -37,6 +40,33 @@ def is_dwg(path) -> bool:
     return Path(path).suffix.lower() == DWG_EXTENSION
 
 
+def _iter_files(root):
+    """Yield ``(relative_path, io_path)`` for every file under *root*.
+
+    ``Path.rglob`` stops at the legacy MAX_PATH boundary on Windows. The
+    General Cloner must read the production Gamma tree, whose paths are far
+    longer than 260 characters, so the walk is done with ``os.scandir`` on the
+    extended-length root. ``relative_path`` stays a normal path for reports and
+    destination construction; ``io_path`` is only used for filesystem calls.
+    """
+    stack = [(long_path(root), Path())]
+    while stack:
+        directory, relative_dir = stack.pop()
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    relative = relative_dir / entry.name
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            stack.append((Path(entry.path), relative))
+                        elif entry.is_file(follow_symlinks=False):
+                            yield relative, Path(entry.path)
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+
+
 def scan_general_dwgs(source_root, bundle_root=None) -> List[GeneralDrawing]:
     """Return every DWG under *source_root*, in stable relative-path order.
 
@@ -49,24 +79,20 @@ def scan_general_dwgs(source_root, bundle_root=None) -> List[GeneralDrawing]:
 
     bundle = Path(bundle_root).expanduser().resolve() if bundle_root else None
     drawings: List[GeneralDrawing] = []
-    # Sorting the resolved paths keeps duplicate detection and report rows
-    # deterministic even when the filesystem returns entries in another order.
-    candidates = sorted(root.rglob("*"), key=lambda path: path.relative_to(root).as_posix().casefold())
-    for path in candidates:
-        try:
-            if not path.is_file() or not is_dwg(path):
-                continue
-            relative = path.relative_to(root)
-        except (OSError, ValueError):
+    for relative, io_path in sorted(
+        _iter_files(root), key=lambda item: item[0].as_posix().casefold()
+    ):
+        if not is_dwg(relative):
             continue
         try:
-            stat = path.stat()
+            stat = long_path(io_path).stat()
         except OSError:
             continue
+        source_path = root / relative
         drawing = GeneralDrawing(
-            source_path=str(path),
+            source_path=str(source_path),
             relative_path=relative.as_posix(),
-            filename=path.name,
+            filename=relative.name,
             size_bytes=int(stat.st_size),
             modified_iso=datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
         )

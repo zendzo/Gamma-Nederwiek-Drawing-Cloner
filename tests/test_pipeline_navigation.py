@@ -89,6 +89,10 @@ class PipelineNavigationTests(_DialogPatchMixin, unittest.TestCase):
         self.reports = self.bundle / "_GNI_REPORTS"
         self.reports.mkdir(parents=True)
         self.main = legacy.Main()
+        # These tests describe the Structural pipeline; the live settings file
+        # may legitimately have General Cloner selected, so force the mode.
+        self.main.mode.setCurrentIndex(self.main.mode.findData(legacy.STRUCTURAL_MODE))
+        self.main._mode_changed()
         self.main.src.setText(str(self.root))
         self.main.dst.setText(str(self.root))
         self.main.bundle.setText("BUNDLE")
