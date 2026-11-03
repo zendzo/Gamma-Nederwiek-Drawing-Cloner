@@ -83,6 +83,7 @@ class GeneralCloneResult:
     backup_path: str = ""
     elapsed_seconds: float = 0.0
     log_path: str = ""
+    console_log: str = ""
     result_tsv: str = ""
     exit_code: Optional[int] = None
 
@@ -394,28 +395,45 @@ class GeneralClonerEngine:
 
     def _process_one(self, staged: _Staged):
         if self.process_runner is not None:
-            return self.process_runner(
+            outcome = self.process_runner(
                 job=staged.job,
                 working_dwg=staged.working,
                 config_path=staged.config,
                 result_path=staged.result_tsv,
             )
-        script = staged.job / "general_cloner.scr"
-        lines = [
-            *self._script_header(),
-            self._call_line(staged.config, staged.result_tsv, staged.working),
-            "_.QUIT",
-            "_Y",
-            "",
-        ]
-        script.write_text("\n".join(lines), encoding="ascii", errors="replace")
-        return self._run_script(script, staged.working, staged.job, 1)
+        else:
+            script = staged.job / "general_cloner.scr"
+            lines = [
+                *self._script_header(),
+                self._call_line(staged.config, staged.result_tsv, staged.working),
+                "_.QUIT",
+                "_Y",
+                "",
+            ]
+            script.write_text("\n".join(lines), encoding="ascii", errors="replace")
+            outcome = self._run_script(script, staged.working, staged.job, 1)
+        staged.result.console_log = str(
+            self._write_console_log(staged.job / "console.log", outcome)
+        )
+        return outcome
 
     @staticmethod
     def _combined(outcome) -> str:
         return str(getattr(outcome, "stdout", "") or "") + "\n" + str(
             getattr(outcome, "stderr", "") or ""
         )
+
+    def _write_console_log(self, path: Path, outcome) -> Path:
+        try:
+            path.write_text(
+                f"EXIT={getattr(outcome, 'returncode', None)}\n"
+                f"{self._combined(outcome)}",
+                encoding="utf-8",
+                errors="replace",
+            )
+        except OSError:
+            pass
+        return path
 
     def _verify_result(self, staged: _Staged, outcome, strict: bool) -> int:
         combined = self._combined(outcome)
@@ -446,6 +464,14 @@ class GeneralClonerEngine:
             status = str(row.get("Status") or "").strip().upper()
             if status in ("FAILED", "QSAVE_FAILED", "WRONG_DRAWING"):
                 raise GeneralClonerError("GENERAL_WRITE_FAILED:" + status)
+        summary_rows = [
+            row for row in rows if not str(row.get("Handle") or "").strip()
+        ]
+        if not any(
+            str(row.get("Status") or "").strip().upper() == "OK"
+            for row in summary_rows
+        ):
+            raise GeneralClonerError("GENERAL_RESULT_INCOMPLETE")
         # The LISP writes one row per changed entity plus a summary row.  Sum
         # only the per-entity rows when they exist, otherwise a summary-only
         # result (the test runner) would be counted twice.
@@ -602,6 +628,7 @@ class GeneralClonerEngine:
                     f"ACTION={result.action}\n"
                     f"REPLACEMENTS={result.replacements}\n"
                     f"SKIP_REASON={result.skip_reason}\n"
+                    f"CONSOLE_LOG={result.console_log}\n"
                     f"ERROR={result.error}\n",
                     encoding="utf-8",
                     errors="replace",
@@ -677,6 +704,9 @@ class GeneralClonerEngine:
             outcome = SimpleNamespace(
                 returncode=None, stdout="", stderr=f"GENERAL_BATCH_FAILED:{error!r}"
             )
+        console_log = str(self._write_console_log(batch / "batch_console.log", outcome))
+        for staged in runnable:
+            staged.result.console_log = console_log
 
         batch_failure = str(getattr(outcome, "stderr", "") or "")
         for staged in runnable:

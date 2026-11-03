@@ -88,7 +88,7 @@
       (setq count *GNI:REPLACE-COUNT*)
       (setq data
         (mapcar
-          (lambda (pair)
+          '(lambda (pair)
             (if (or (= (car pair) 1) (= (car pair) 3))
               (progn
                 (setq newValue (GNI:REPLACE-TEXT (cdr pair) replacements))
@@ -129,6 +129,22 @@
           (setq total (+ total (GNI:PROCESS-ENTITY resultStream entity replacements)))))))
   total)
 
+;; Core Console has no LAYOUTLIST function.  The layout dictionary is still
+;; available through plain AutoLISP, so enumerate it directly instead of using
+;; ActiveX (which returns nil in Core Console).
+(defun GNI:LAYOUT-NAMES ( / dict entry name result)
+  (setq result '())
+  (setq dict (dictsearch (namedobjdict) "ACAD_LAYOUT"))
+  (if dict
+    (progn
+      (setq dict (cdr (assoc -1 dict)))
+      (setq entry (dictnext dict T))
+      (while entry
+        (setq name (cdr (assoc 3 entry)))
+        (if name (setq result (cons name result)))
+        (setq entry (dictnext dict)))))
+  (reverse result))
+
 (defun GNI:RUN-GENERAL-CLONE-BODY (replacementPath resultPath / parsed ok replacements stream layout total status saveResult)
   (setq *GNI:REPLACE-COUNT* 0)
   (setq *GNI:WRITE-FAILURES* 0)
@@ -146,7 +162,7 @@
             '("Handle" "Entity Type" "Old Value" "New Value" "Replacements" "Status"))
           (setq total 0)
           (setq total (+ total (GNI:SCAN-LAYOUT stream replacements "Model")))
-          (foreach layout (layoutlist)
+          (foreach layout (GNI:LAYOUT-NAMES)
             (if (/= (strcase layout) "MODEL")
               (setq total (+ total (GNI:SCAN-LAYOUT stream replacements layout)))))
           (if (> *GNI:WRITE-FAILURES* 0)
@@ -174,8 +190,8 @@
               (if (= status "OK")
                 (princ
                   (strcat "\nGNI_GENERAL_CLONER_OK:REPLACEMENTS="
-                    (itoa total)))))))))
-  (princ)))
+                    (itoa total))))))))))
+  (princ))
 
 (defun GNI:RUN-GENERAL-CLONE (replacementPath resultPath expectedName / current wrongStream)
   (setq current (vl-filename-base (getvar "DWGNAME")))

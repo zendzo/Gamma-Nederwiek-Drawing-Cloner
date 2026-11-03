@@ -306,6 +306,25 @@ class GeneralClonerEngineTests(unittest.TestCase):
         self.assertEqual(results[0].status, "FAILED")
         self.assertIn("GENERAL_WRITE_FAILED", results[0].error)
 
+    def test_result_without_a_summary_row_is_a_failure(self):
+        self.write("plan.dwg")
+
+        def partial_runner(*, job, working_dwg, config_path, result_path):
+            Path(result_path).write_text(
+                "Handle\tEntity Type\tOld Value\tNew Value\tReplacements\tStatus\n"
+                "A1\tTEXT\told\tnew\t1\tWRITTEN\n",
+                encoding="utf-8",
+            )
+            return SimpleNamespace(
+                returncode=0,
+                stdout=GeneralClonerEngine.LOAD_MARKER,
+                stderr="",
+            )
+
+        results, _, _, _ = self.engine(runner=partial_runner).run()
+        self.assertEqual(results[0].status, "FAILED")
+        self.assertIn("GENERAL_RESULT_INCOMPLETE", results[0].error)
+
     def test_wrong_drawing_status_is_a_failure(self):
         self.write("plan.dwg")
 
@@ -474,6 +493,10 @@ class GeneralClonerLispContractTests(unittest.TestCase):
         self.assertIn("(= (car pair) 3)", text)
         self.assertIn("TEXT,MTEXT,ATTRIB,ATTDEF", text)
         self.assertIn("WRONG_DRAWING", text)
+        self.assertIn("'(lambda", text)
+        self.assertIn("GNI:LAYOUT-NAMES", text)
+        self.assertIn("dictnext", text)
+        self.assertNotIn("layoutlist", text)
 
 
 class StructuralRegressionTests(unittest.TestCase):
