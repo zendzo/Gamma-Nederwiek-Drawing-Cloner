@@ -3,9 +3,11 @@
 ;; General Cloner 0.5.0
 ;; File-oriented find-and-replace writer.  Unlike the Structural writer this
 ;; does not need a title-block discovery pass or per-handle actions: it walks
-;; every TEXT/MTEXT/ATTRIB/ATTDEF in model space and every layout and applies
-;; the configured literal replacements.  The source DWG is never opened here;
-;; Python stages a private working copy under %TEMP% and runs this script on it.
+;; every TEXT/MTEXT/ATTRIB/ATTDEF in model space, every paper-space layout, and
+;; every non-layout block definition (including anonymous A$C... title blocks)
+;; and applies the configured literal replacements.  The source DWG is never
+;; opened here; Python stages a private working copy under %TEMP% and runs this
+;; script on it.
 
 (defun GNI:SAFE (value / text)
   (if value
@@ -77,7 +79,7 @@
 
 ;; Group 1 is the text value for TEXT/ATTRIB/ATTDEF and the first MTEXT chunk;
 ;; group 3 holds the remaining MTEXT chunks.  Both are rewritten in place.
-(defun GNI:PROCESS-ENTITY (resultStream entity replacements / data handle entityType oldValue newValue changed writeResult count entityCount)
+(defun GNI:PROCESS-ENTITY (resultStream entity replacements scope / data handle entityType oldValue newValue changed writeResult count entityCount)
   (setq data (vl-catch-all-apply 'entget (list entity)))
   (if (not (vl-catch-all-error-p data))
     (progn
@@ -104,15 +106,30 @@
           (if (or (vl-catch-all-error-p writeResult) (null writeResult))
             (progn
               (setq *GNI:WRITE-FAILURES* (1+ *GNI:WRITE-FAILURES*))
-              (GNI:ROW resultStream (list handle entityType oldValue newValue 0 "FAILED"))
+              (GNI:ROW resultStream (list handle entityType oldValue newValue 0 "FAILED" scope))
               0)
             (progn
               (vl-catch-all-apply 'entupd (list entity))
-              (GNI:ROW resultStream (list handle entityType oldValue newValue entityCount "WRITTEN"))
+              (GNI:ROW resultStream (list handle entityType oldValue newValue entityCount "WRITTEN" scope))
               entityCount)))
         0))))
 
-(defun GNI:SCAN-LAYOUT (resultStream replacements layout / selection index entity total)
+(defun GNI:PROCESS-INSERT-ATTRIBS (resultStream entity replacements scope / ed sub ed2 typ total)
+  (setq total 0)
+  (setq ed (entget entity))
+  ;; DXF 66 = 1 means attribute entities follow the INSERT.  Without this
+  ;; guard, ENTGET/ENTNEXT walks into unrelated drawing entities.
+  (if (= (cdr (assoc 66 ed)) 1)
+    (progn
+      (setq sub (entnext entity))
+      (while (and sub (setq ed2 (entget sub)) (/= (cdr (assoc 0 ed2)) "SEQEND"))
+        (setq typ (cdr (assoc 0 ed2)))
+        (if (= typ "ATTRIB")
+          (setq total (+ total (GNI:PROCESS-ENTITY resultStream sub replacements scope))))
+        (setq sub (entnext sub)))))
+  total)
+
+(defun GNI:SCAN-LAYOUT (resultStream replacements layout / selection index entity total inserts)
   (setq total 0)
   (setq selection
     (ssget "_X"
@@ -126,23 +143,69 @@
         (setq entity (ssname selection index))
         (setq index (1+ index))
         (if entity
-          (setq total (+ total (GNI:PROCESS-ENTITY resultStream entity replacements)))))))
+          (setq total (+ total (GNI:PROCESS-ENTITY resultStream entity replacements layout)))))))
+  ;; Attributes attached to INSERTs are not reliably returned by the text
+  ;; selection above, so walk each INSERT's attribute sequence explicitly.
+  (setq inserts
+    (ssget "_X"
+      (list
+        (cons 0 "INSERT")
+        (cons 410 layout))))
+  (if inserts
+    (progn
+      (setq index 0)
+      (repeat (sslength inserts)
+        (setq entity (ssname inserts index))
+        (setq index (1+ index))
+        (if entity
+          (setq total (+ total (GNI:PROCESS-INSERT-ATTRIBS resultStream entity replacements layout)))))))
   total)
 
-;; Core Console has no LAYOUTLIST function.  The layout dictionary is still
-;; available through plain AutoLISP, so enumerate it directly instead of using
-;; ActiveX (which returns nil in Core Console).
-(defun GNI:LAYOUT-NAMES ( / dict entry name result)
+(defun GNI:PROCESS-BLOCK-DEF (resultStream replacements name / en sub ed typ total scope)
+  (setq total 0)
+  (setq scope (strcat "BLOCK:" name))
+  (setq en (tblobjname "BLOCK" name))
+  (if en
+    (progn
+      (setq sub (entnext en))
+      (while (and sub (setq ed (entget sub)) (/= (cdr (assoc 0 ed)) "ENDBLK"))
+        (setq typ (cdr (assoc 0 ed)))
+        (cond
+          ((or (= typ "TEXT") (= typ "MTEXT") (= typ "ATTDEF"))
+            (setq total (+ total (GNI:PROCESS-ENTITY resultStream sub replacements scope))))
+          ((= typ "INSERT")
+            (setq total (+ total (GNI:PROCESS-INSERT-ATTRIBS resultStream sub replacements scope)))))
+        (setq sub (entnext sub)))))
+  total)
+
+(defun GNI:PROCESS-BLOCKS (resultStream replacements / blk name total)
+  (setq total 0)
+  (setq blk (tblnext "BLOCK" T))
+  (while blk
+    (setq name (cdr (assoc 2 blk)))
+    ;; The layout blocks mirror the entities already scanned through their
+    ;; layout names; processing them again would duplicate every paper-space
+    ;; entity.  Anonymous drawing blocks (A$C... / *U...) are processed.
+    (if (and name
+             (not (wcmatch (strcase name) "*PAPER_SPACE*"))
+             (not (wcmatch (strcase name) "*MODEL_SPACE*")))
+      (setq total (+ total (GNI:PROCESS-BLOCK-DEF resultStream replacements name))))
+    (setq blk (tblnext "BLOCK")))
+  total)
+
+;; Core Console has no LAYOUTLIST function.  The ACAD_LAYOUT dictionary data
+;; itself contains one (3 . layout-name) pair per layout, including paper-space
+;; layouts, so parse it directly instead of using ActiveX.
+(defun GNI:LAYOUT-NAMES ( / dict pair name result)
   (setq result '())
   (setq dict (dictsearch (namedobjdict) "ACAD_LAYOUT"))
   (if dict
-    (progn
-      (setq dict (cdr (assoc -1 dict)))
-      (setq entry (dictnext dict T))
-      (while entry
-        (setq name (cdr (assoc 3 entry)))
-        (if name (setq result (cons name result)))
-        (setq entry (dictnext dict)))))
+    (foreach pair dict
+      (if (= (car pair) 3)
+        (progn
+          (setq name (cdr pair))
+          (if (and name (/= name "."))
+            (setq result (cons name result)))))))
   (reverse result))
 
 (defun GNI:RUN-GENERAL-CLONE-BODY (replacementPath resultPath / parsed ok replacements stream layout total status saveResult)
@@ -159,12 +222,16 @@
         (princ "\nGNI_GENERAL_CLONER_FAILED:RESULT_FILE_OPEN_FAILED")
         (progn
           (GNI:ROW stream
-            '("Handle" "Entity Type" "Old Value" "New Value" "Replacements" "Status"))
+            '("Handle" "Entity Type" "Old Value" "New Value" "Replacements" "Status" "Scope"))
           (setq total 0)
           (setq total (+ total (GNI:SCAN-LAYOUT stream replacements "Model")))
           (foreach layout (GNI:LAYOUT-NAMES)
             (if (/= (strcase layout) "MODEL")
               (setq total (+ total (GNI:SCAN-LAYOUT stream replacements layout)))))
+          ;; Title blocks and other anonymous blocks live in the block table,
+          ;; not in model/layout space.  Scan every non-layout block definition
+          ;; so values inside A$C... blocks are migrated too.
+          (setq total (+ total (GNI:PROCESS-BLOCKS stream replacements)))
           (if (> *GNI:WRITE-FAILURES* 0)
             (progn
               (setq status "FAILED")

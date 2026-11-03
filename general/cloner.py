@@ -22,7 +22,7 @@ replace, batching/pool) are reused from ``runtime/``.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -35,7 +35,7 @@ import tempfile
 import threading
 import time
 import uuid
-from typing import Callable, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from destination.builder import DestinationBuilder
 from general.constants import GENERAL_MODE, GENERAL_POLICIES
@@ -75,6 +75,7 @@ class GeneralCloneResult:
     status: str
     action: str = ""
     replacements: int = 0
+    scope_counts: Dict[str, int] = field(default_factory=dict)
     skip_reason: str = ""
     error: str = ""
     source_sha256: str = ""
@@ -435,7 +436,7 @@ class GeneralClonerEngine:
             pass
         return path
 
-    def _verify_result(self, staged: _Staged, outcome, strict: bool) -> int:
+    def _verify_result(self, staged: _Staged, outcome, strict: bool):
         combined = self._combined(outcome)
         exit_code = getattr(outcome, "returncode", None)
         staged.result.exit_code = exit_code
@@ -476,12 +477,17 @@ class GeneralClonerEngine:
         # only the per-entity rows when they exist, otherwise a summary-only
         # result (the test runner) would be counted twice.
         entity_rows = [row for row in rows if str(row.get("Handle") or "").strip()]
+        scopes: Dict[str, int] = {}
         for row in (entity_rows or rows):
             try:
-                total += int(str(row.get("Replacements") or "0").strip() or "0")
+                count = int(str(row.get("Replacements") or "0").strip() or "0")
             except ValueError:
                 continue
-        return total
+            total += count
+            scope = str(row.get("Scope") or "RESULT").strip() or "RESULT"
+            if count:
+                scopes[scope] = scopes.get(scope, 0) + count
+        return total, scopes
 
     def _backup_existing(self, destination: Path) -> Path:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
@@ -602,7 +608,9 @@ class GeneralClonerEngine:
         if result.status != "PROCESSING":
             return
         try:
-            result.replacements = self._verify_result(staged, outcome, strict)
+            result.replacements, result.scope_counts = self._verify_result(
+                staged, outcome, strict
+            )
             self._publish(staged)
         except Exception as error:
             result.status = "FAILED"
@@ -627,6 +635,7 @@ class GeneralClonerEngine:
                     f"STATUS={result.status}\n"
                     f"ACTION={result.action}\n"
                     f"REPLACEMENTS={result.replacements}\n"
+                    f"SCOPES={json.dumps(result.scope_counts, ensure_ascii=False, sort_keys=True)}\n"
                     f"SKIP_REASON={result.skip_reason}\n"
                     f"CONSOLE_LOG={result.console_log}\n"
                     f"ERROR={result.error}\n",
@@ -639,6 +648,10 @@ class GeneralClonerEngine:
             f"STATUS={result.status} SOURCE={result.source_path} "
             f"DEST={result.destination_path} REPLACEMENTS={result.replacements}"
         )
+        if result.scope_counts:
+            line += " SCOPES=" + json.dumps(
+                result.scope_counts, ensure_ascii=False, sort_keys=True
+            )
         if result.skip_reason:
             line += " SKIP=" + result.skip_reason
         if result.error:

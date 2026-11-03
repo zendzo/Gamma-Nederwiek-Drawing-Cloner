@@ -344,6 +344,33 @@ class GeneralClonerEngineTests(unittest.TestCase):
         self.assertEqual(results[0].status, "FAILED")
         self.assertIn("WRONG_DRAWING", results[0].error)
 
+    def test_scope_counts_are_reported(self):
+        self.write("plan.dwg")
+
+        def scoped_runner(*, job, working_dwg, config_path, result_path):
+            Path(result_path).write_text(
+                "Handle\tEntity Type\tOld Value\tNew Value\tReplacements\tStatus\tScope\n"
+                "A1\tTEXT\told\tnew\t2\tWRITTEN\tModel\n"
+                "B2\tTEXT\told\tnew\t3\tWRITTEN\tBLOCK:A$Cf9ad7d4b\n"
+                "\t\t\t\t5\tOK\t\n",
+                encoding="utf-8",
+            )
+            return SimpleNamespace(
+                returncode=0,
+                stdout=GeneralClonerEngine.LOAD_MARKER,
+                stderr="",
+            )
+
+        results, report, _, _ = self.engine(runner=scoped_runner).run()
+        self.assertEqual(results[0].status, "SUCCESS")
+        self.assertEqual(results[0].replacements, 5)
+        self.assertEqual(
+            results[0].scope_counts,
+            {"Model": 2, "BLOCK:A$Cf9ad7d4b": 3},
+        )
+        payload = json.loads(Path(report).read_text(encoding="utf-8"))
+        self.assertEqual(payload["results"][0]["scope_counts"]["Model"], 2)
+
     def test_source_validation_rejects_a_missing_folder(self):
         engine = self.engine()
         missing = self.root / "missing"
@@ -495,7 +522,10 @@ class GeneralClonerLispContractTests(unittest.TestCase):
         self.assertIn("WRONG_DRAWING", text)
         self.assertIn("'(lambda", text)
         self.assertIn("GNI:LAYOUT-NAMES", text)
-        self.assertIn("dictnext", text)
+        self.assertIn("dictsearch", text)
+        self.assertIn("GNI:PROCESS-BLOCKS", text)
+        self.assertIn("GNI:PROCESS-INSERT-ATTRIBS", text)
+        self.assertIn("Scope", text)
         self.assertNotIn("layoutlist", text)
 
 
