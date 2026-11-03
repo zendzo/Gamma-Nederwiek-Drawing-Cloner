@@ -16,6 +16,7 @@ from reporting.dashboard import ReportDashboard
 from runtime import fonts,logging_setup,paths
 from runtime.job_state import load_scan_state,load_supporting_results,load_discovery_results,load_revision_plans,resolve_bundle_root,clone_should_be_skipped,write_scan_state
 from runtime.coreconsole import detect as detect_core_console
+from general.constants import CLONER_MODES,GENERAL_MODE,GENERAL_POLICIES,STRUCTURAL_MODE
 BASE=paths.app_root();CFG=paths.settings_path()
 PIPELINE=(('scan','Scan source'),('destination','Build destination'),('clone','Clone supporting files'),('discovery','Discover title blocks'),('plan','Build revision plan'),('writer','Stable external writer'),('validator','Reopen validator'),('dryrun','Atomic publish dry run'),('publish','Atomic publisher'),('pdf','Publish PDFs'))
 STAGE_REPORTS={'destination':'destination_manifest.json','clone':'supporting_file_clone_report.json','discovery':'title_block_discovery_report.json','plan':'revision_pilot_write_plan.json','writer':'stable_external_writer_report.json','validator':'reopen_validation_report.json','dryrun':'atomic_publish_dry_run_report.json','publish':'atomic_publish_report.json','pdf':'pdf_publish_report.json'}
@@ -26,13 +27,15 @@ class NoWheelSpinBox(QSpinBox):
  def wheelEvent(self,event):event.ignore()
 class Main(QMainWindow):
  def __init__(self):
-  super().__init__();self.setWindowIcon(QIcon(str(BASE/'resources'/'app_icon.ico')));self.bg=BackgroundOperationController(self);self.bg.progress.connect(self._bg_progress);self.bg.status.connect(self.status_update_safe);self.bg.finished.connect(self._bg_finished);self.bg.failed.connect(self._bg_failed);self.resize(1500,850);self.setWindowTitle(f'Gamma to Nederwiek - Revision Migration ({paths.version()} - new job reset)');self.s=Settings.load(CFG);self._finished_root=None;self._report_signature=None;self.files=[];self.groups=[];self.support=[];self._chain=False;self._skipped=set();self._running_stage=None;self._busy=False
-  tabs=QTabWidget();self.setCentralWidget(tabs);w=QWidget();tabs.addTab(w,'Setup');l=QVBoxLayout(w);f=QFormLayout();self.src=QLineEdit(self.s.source_folder);self.dst=QLineEdit(self.s.destination_root);self.bundle=QLineEdit(self.s.destination_bundle_name);self.exe=QLineEdit(self.s.core_console or detect_core_console())
+  super().__init__();self.setWindowIcon(QIcon(str(BASE/'resources'/'app_icon.ico')));self.bg=BackgroundOperationController(self);self.bg.progress.connect(self._bg_progress);self.bg.status.connect(self.status_update_safe);self.bg.log.connect(self._on_bg_log);self.bg.finished.connect(self._bg_finished);self.bg.failed.connect(self._bg_failed);self.resize(1500,850);self.setWindowTitle(f'Gamma to Nederwiek - Revision Migration ({paths.version()} - new job reset)');self.s=Settings.load(CFG);self._finished_root=None;self._report_signature=None;self.files=[];self.groups=[];self.support=[];self.general_results=[];self._chain=False;self._skipped=set();self._running_stage=None;self._busy=False
+  tabs=QTabWidget();self.setCentralWidget(tabs);w=QWidget();tabs.addTab(w,'Setup');l=QVBoxLayout(w);f=QFormLayout();self.mode=NoWheelComboBox();
+  for mode,label in CLONER_MODES:self.mode.addItem(label,mode)
+  self.mode.setCurrentIndex(max(0,self.mode.findData(self.s.cloner_mode)));self.mode.currentIndexChanged.connect(self._mode_changed);f.addRow('Cloner mode',self.mode);self.src=QLineEdit(self.s.source_folder);self.dst=QLineEdit(self.s.destination_root);self.bundle=QLineEdit(self.s.destination_bundle_name);self.exe=QLineEdit(self.s.core_console or detect_core_console())
   for label,e,folder in [('Source',self.src,True),('Destination root',self.dst,True),('Bundle name',self.bundle,None),('accoreconsole.exe',self.exe,False)]:f.addRow(label,self.browse(e,folder) if folder is not None else e)
   l.addLayout(f);self.maped=[]
   m=QGroupBox('Controlled replacement mapping');mf=QFormLayout(m)
   for label,attr,default in [('Project from','project_from','IJMUIDEN VER GAMMA'),('Project to','project_to','NEDERWIEK BETA'),('Drawing from','drawing_from','2013J310015'),('Drawing to','drawing_to','I301-J30019'),('Long ref from','long_from','OEPA230146'),('Long ref to','long_to','OEPA240101'),('Short ref from','short_from','230146'),('Short ref to','short_to','240101'),('Contractor doc-id from','contractor_doc_from','2GWG'),('Contractor doc-id to','contractor_doc_to','2GWN')]:e=QLineEdit(getattr(self.s,attr,default));self.maped.append((attr,e));mf.addRow(label,e)
-  l.addWidget(m);self.recent=NoWheelComboBox();self.recent.activated.connect(self._recent_selected);lr=QHBoxLayout();lr.addWidget(QLabel('Load previous job'));lr.addWidget(self.recent,1);l.addLayout(lr);self._populate_recent_jobs();pg=QGroupBox('Migration pipeline');pv=QVBoxLayout(pg);self.stage_tbl=self.table(['Step','Stage','Status','Report']);self.stage_tbl.setEditTriggers(QAbstractItemView.NoEditTriggers);self.stage_tbl.setSelectionMode(QAbstractItemView.SingleSelection);self.stage_tbl.setSelectionBehavior(QAbstractItemView.SelectRows);self.stage_tbl.setMaximumHeight(230);self.stage_tbl.cellDoubleClicked.connect(self.open_stage_report);pv.addWidget(self.stage_tbl)
+  l.addWidget(m);self.recent_box=QWidget();lr=QHBoxLayout(self.recent_box);lr.setContentsMargins(0,0,0,0);self.recent=NoWheelComboBox();self.recent.activated.connect(self._recent_selected);lr.addWidget(QLabel('Load previous job'));lr.addWidget(self.recent,1);l.addWidget(self.recent_box);self._populate_recent_jobs();pg=QGroupBox('Migration pipeline');pv=QVBoxLayout(pg);self.stage_tbl=self.table(['Step','Stage','Status','Report']);self.stage_tbl.setEditTriggers(QAbstractItemView.NoEditTriggers);self.stage_tbl.setSelectionMode(QAbstractItemView.SingleSelection);self.stage_tbl.setSelectionBehavior(QAbstractItemView.SelectRows);self.stage_tbl.setMaximumHeight(230);self.stage_tbl.cellDoubleClicked.connect(self.open_stage_report);pv.addWidget(self.stage_tbl)
   self.primary=QPushButton('Run: Scan source');self.primary.setMinimumHeight(38);self.primary.clicked.connect(self.run_next_stage);self.primary.setDefault(True);pv.addWidget(self.primary)
   # Only reachable once the PDF stage is complete and nothing is running; the
   # pipeline derives every row from report files, so this clears session state
@@ -42,14 +45,46 @@ class Main(QMainWindow):
   self.prog=QProgressBar();pv.addWidget(self.prog);self.status=QLabel('Ready. The button runs every remaining step up to the publish gate.');self.status.setWordWrap(True);pv.addWidget(self.status)
   self.adv=QGroupBox('Advanced - run or re-run one stage');self.adv.setCheckable(True);self.adv.setChecked(False);ag=QGridLayout(self.adv);self.stage_buttons={}
   for index,(key,label) in enumerate(PIPELINE):button=QPushButton(label);button.clicked.connect(lambda checked=False,stage=key:self.run_stage(stage));button.setEnabled(False);ag.addWidget(button,index//3,index%3);self.stage_buttons[key]=button
-  self.adv.toggled.connect(self._sync_advanced_buttons);pv.addWidget(self.adv);l.addWidget(pg);l.addStretch();self._sync_advanced_buttons(False)
+  self.adv.toggled.connect(self._sync_advanced_buttons);pv.addWidget(self.adv);l.addWidget(pg);l.addStretch();self._sync_advanced_buttons(False);self.pipeline_group=pg
+  wg=QWidget();tabs.addTab(wg,'General Cloner');gl=QVBoxLayout(wg);self.general_tbl=self.table(['Source','Relative path','Destination','Status','Replacements','Skip reason','Error']);self.general_tbl.setEditTriggers(QAbstractItemView.NoEditTriggers);self.general_tbl.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive);gl.addWidget(self.general_tbl,1)
+  gbar=QHBoxLayout();self.general_runb=QPushButton('Run General Cloner');self.general_runb.clicked.connect(self.run_general_cloner);self.general_cancelb=QPushButton('Cancel Safely');self.general_cancelb.setEnabled(False);self.general_cancelb.clicked.connect(self.cancel_unified_operation);self.general_policy=NoWheelComboBox();self.general_policy.addItems(list(GENERAL_POLICIES));self.general_policy.setCurrentText(self.s.general_conflict_policy);gbar.addWidget(self.general_runb);gbar.addWidget(self.general_cancelb);gbar.addWidget(QLabel('Collision:'));gbar.addWidget(self.general_policy);gbar.addStretch();self.general_batch=NoWheelSpinBox();self.general_batch.setRange(1,16);self.general_batch.setValue(max(1,min(16,int(getattr(self.s,'general_batch_size',4)))));self.general_batch.setToolTip('Drawings per Core Console process. 4-8 is faster than 1; set 1 for the slow one-process-per-drawing baseline.');self.general_workers=NoWheelSpinBox();self.general_workers.setRange(1,16);self.general_workers.setValue(max(1,min(16,int(getattr(self.s,'general_workers',4)))));self.general_workers.setToolTip('Concurrent Core Console processes for General Cloner.');gbar.addWidget(QLabel('Clone batch'));gbar.addWidget(self.general_batch);gbar.addWidget(QLabel('Clone workers'));gbar.addWidget(self.general_workers);gl.addLayout(gbar)
+  self.general_prog=QProgressBar();gl.addWidget(self.general_prog);self.general_status=QLabel('Ready. General Cloner recursively clones every DWG and applies the replacement mapping; non-DWG files are ignored.');self.general_status.setWordWrap(True);gl.addWidget(self.general_status)
+  gl.addWidget(QLabel('General Cloner log'));self.general_log=QPlainTextEdit();self.general_log.setReadOnly(True);self.general_log.setMaximumBlockCount(5000);gl.addWidget(self.general_log,1)
+  gfoot=QHBoxLayout();self.general_openb=QPushButton('Open Destination');self.general_openb.clicked.connect(self.open_general_destination);self.general_reportsb=QPushButton('Open Reports Folder');self.general_reportsb.clicked.connect(self.open_reports_folder);gfoot.addWidget(self.general_openb);gfoot.addWidget(self.general_reportsb);gfoot.addStretch();gl.addLayout(gfoot)
   w2=QWidget();tabs.addTab(w2,'Drawing Candidates');ll=QVBoxLayout(w2);self.tbl=self.table(['Type','Identity','Primary source','A donor','Candidates','Warning']);ll.addWidget(self.tbl)
   ws=QWidget();tabs.addTab(ws,'Supporting File Clone');sl=QVBoxLayout(ws);self.stbl=self.table(['Select','Role','Extension','Source Path','Destination','Status','Action','Backup','Error']);sl.addWidget(self.stbl);sbar=QHBoxLayout();self.cloneb=QPushButton('Clone Selected Supporting Files');self.cloneb.clicked.connect(self.clone_supporting);self.policy=NoWheelComboBox();self.policy.addItems(['BACKUP_OVERWRITE','SKIP_DIFFERENT','KEEP_BOTH']);self.retryb=QPushButton('Retry Failed Copies');self.retryb.clicked.connect(self.retry_supporting);self.openb=QPushButton('Open Supporting Destination');self.openb.clicked.connect(self.open_supporting_destination);sbar.addWidget(self.cloneb);sbar.addWidget(QLabel('Collision:'));sbar.addWidget(self.policy);sbar.addWidget(self.retryb);sbar.addWidget(self.openb);sbar.addStretch();sl.addLayout(sbar);self.support_results=[]
   wd=QWidget();tabs.addTab(wd,'Title Block Discovery');dl=QVBoxLayout(wd);self.dtbl=self.table(['Identity','Type','Source','Entity','Handle','Layer','Block','Tag','Value','Suggested Field','Confidence','Score','Evidence','Proposed A','Proposed 00','Warning']);dl.addWidget(self.dtbl);self.discovery_results=[]
   wp=QWidget();tabs.addTab(wp,'Revision Plan');pl=QVBoxLayout(wp);self.ptbl=self.table(['Identity','Type','Status','Primary Geometry','A Source Policy','Migration Date','A Date','00 Date','Actions','Warnings','Errors']);pl.addWidget(self.ptbl);self.revision_plans=[]
   w3=QWidget();tabs.addTab(w3,'Reports');lll=QVBoxLayout(w3);self.rtbl=self.table(['Report','Modified','Size (KB)']);self.rtbl.cellDoubleClicked.connect(self.open_report);self._report_paths=[]
-  self.refreshb=QPushButton('Refresh Reports');self.refreshb.clicked.connect(self.refresh_reports);self.folderb=QPushButton('Open Reports Folder');self.folderb.clicked.connect(self.open_reports_folder);self.dashboard=ReportDashboard(self.rtbl,(self.refreshb,self.folderb),'Reports are the pipeline handoff files in <destination>/<bundle>/_GNI_REPORTS. Double-click a row to open it. Revision-cloud deletion and DXF content migration are not implemented yet.');self.dashboard.stageActivated.connect(self._open_path);lll.addWidget(self.dashboard,1);tabs.currentChanged.connect(self._tab_changed);self.refresh_pipeline()
+  self.refreshb=QPushButton('Refresh Reports');self.refreshb.clicked.connect(self.refresh_reports);self.folderb=QPushButton('Open Reports Folder');self.folderb.clicked.connect(self.open_reports_folder);self.dashboard=ReportDashboard(self.rtbl,(self.refreshb,self.folderb),'Reports are the pipeline handoff files in <destination>/<bundle>/_GNI_REPORTS. Double-click a row to open it. Revision-cloud deletion and DXF content migration are not implemented yet.');self.dashboard.stageActivated.connect(self._open_path);lll.addWidget(self.dashboard,1);tabs.currentChanged.connect(self._tab_changed);self.refresh_pipeline();self._apply_mode_visibility()
  def table(self,h):t=QTableWidget(0,len(h));t.setHorizontalHeaderLabels(h);t.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents);t.horizontalHeader().setStretchLastSection(True);return t
+ def cloner_mode(self):return self.mode.currentData() if hasattr(self,'mode') else STRUCTURAL_MODE
+ def _mode_changed(self,index=None):
+  __import__('logging').getLogger('gni').info('cloner_mode=%s',self.cloner_mode())
+  self._apply_mode_visibility()
+  if self.cloner_mode()==STRUCTURAL_MODE:self.status.setText('Structural Shop Drawing Cloner mode: title-block discovery and revision migration.')
+  self.save()
+ def _apply_mode_visibility(self):
+  general=self.cloner_mode()==GENERAL_MODE
+  if hasattr(self,'pipeline_group'):self.pipeline_group.setVisible(not general)
+  if hasattr(self,'recent_box'):self.recent_box.setVisible(not general)
+  titles=('Drawing Candidates','Supporting File Clone','Title Block Discovery','Revision Plan')
+  tabs=self.centralWidget()
+  if isinstance(tabs,QTabWidget):
+   for i in range(tabs.count()):
+    title=tabs.tabText(i)
+    if title in titles:tabs.setTabVisible(i,not general)
+    elif title=='General Cloner':tabs.setTabVisible(i,general)
+   if general and tabs.tabText(tabs.currentIndex()) in titles:
+    for i in range(tabs.count()):
+     if tabs.tabText(i)=='General Cloner':tabs.setCurrentIndex(i);break
+  if hasattr(self,'_page_names') and hasattr(self,'nav_buttons'):
+   for i,title in enumerate(self._page_names):
+    if title in titles:self.nav_buttons[i].setVisible(not general)
+    elif title=='General Cloner':self.nav_buttons[i].setVisible(general)
+   if general and hasattr(self,'page_stack') and 'General Cloner' in self._page_names and self._page_names[self.page_stack.currentIndex()] in titles:self._show_page(self._page_names.index('General Cloner'))
+  if hasattr(self,'general_runb'):self.general_runb.setEnabled(not self._busy)
+  if general:self.status.setText('General Cloner mode: recursive DWG clone with find-and-replace. Non-DWG files are ignored.')
  def _sync_advanced_buttons(self,on):
   for button in self.stage_buttons.values():button.setEnabled(bool(on) and not self._busy)
  def stage_report_path(self,key):
@@ -203,6 +238,7 @@ class Main(QMainWindow):
   elif key=='pdf':self.primary.setText('Publish PDFs')
   else:self.primary.setText('Run migration to publish gate: '+label)
  def run_next_stage(self):
+  if self.cloner_mode()==GENERAL_MODE:self.status.setText('General Cloner mode is active. Use the General Cloner tab to run it.');return
   nxt=self.next_stage()
   if not nxt:self.show_reports_tab();self.status.setText('All pipeline stages are complete. Reports are listed below.');return
   self._chain=nxt[0] in AUTO_STAGES;self.run_stage(nxt[0])
@@ -210,6 +246,7 @@ class Main(QMainWindow):
   for index in range(self.centralWidget().count()):
    if self.centralWidget().tabText(index)=='Reports':self.centralWidget().setCurrentIndex(index);self.refresh_reports();return
  def run_stage(self,key):
+  __import__('logging').getLogger('gni').info('cloner_mode=%s stage=%s',self.cloner_mode(),key)
   self.save();handler={'scan':self.do_scan,'destination':self.build_destination,'clone':self.clone_supporting,'discovery':self.discover_title_blocks,'plan':self.build_revision_plan,'writer':self.run_controlled_writer,'validator':self.run_reopen_validator,'dryrun':self.run_atomic_publish_dry_run,'publish':self.run_atomic_publisher,'pdf':self.run_pdf_publisher}[key]
   self._running_stage=key;self.refresh_pipeline();started=handler()
   if not started:
@@ -290,10 +327,41 @@ class Main(QMainWindow):
   if p:e.setText(p)
  def save(self):
   self.s.source_folder=self.src.text();self.s.destination_root=self.dst.text();self.s.destination_bundle_name=self.bundle.text();self.s.core_console=self.exe.text()
+  if hasattr(self,'mode'):self.s.cloner_mode=self.cloner_mode()
+  if hasattr(self,'general_policy'):self.s.general_conflict_policy=self.general_policy.currentText()
+  if hasattr(self,'general_workers'):self.s.general_workers=int(self.general_workers.value())
+  if hasattr(self,'general_batch'):self.s.general_batch_size=int(self.general_batch.value())
   if hasattr(self,'workers'):self.s.workers=int(self.workers.value())
   if hasattr(self,'batch'):self.s.discovery_batch_size=int(self.batch.value())
   for a,e in self.maped:setattr(self.s,a,e.text())
   self.s.save(CFG)
+ def run_general_cloner(self):
+  try:
+   self.save();source=self.src.text().strip();destination=self.dst.text().strip();bundle=self.bundle.text().strip()
+   __import__('logging').getLogger('gni').info('cloner_mode=%s source=%s destination=%s bundle=%s',self.cloner_mode(),source,destination,bundle)
+   if not source or not Path(source).is_dir():QMessageBox.critical(self,'General Cloner','Choose a valid source folder.');return False
+   if not destination or not bundle:QMessageBox.critical(self,'General Cloner','Choose a destination root and bundle name.');return False
+   core=self.exe.text().strip()
+   if not core or not Path(core).is_file():QMessageBox.critical(self,'General Cloner','accoreconsole.exe was not found. Set its path on the Setup tab.');return False
+   from general.cloner import validate_general_job
+   try:validate_general_job(source,destination,bundle,BASE)
+   except Exception as error:QMessageBox.critical(self,'General Cloner',str(error));return False
+   mapping={attr:edit.text() for attr,edit in self.maped}
+   self.general_results=[];self.general_tbl.setRowCount(0);self.general_log.clear();self.general_prog.setRange(0,0);self.general_status.setText('Starting General Cloner...')
+   self._start_bg('general',{'source':source,'destination':destination,'bundle':bundle,'app':BASE,'mapping':mapping,'core':core,'lisp':BASE/'lisp'/'general_cloner.lsp','policy':self.general_policy.currentText(),'workers':int(self.general_workers.value()),'batch_size':int(self.general_batch.value())});return True
+  except Exception as error:QMessageBox.critical(self,'General Cloner failed',str(error));return False
+ def refresh_general(self):
+  results=getattr(self,'general_results',[])
+  self.general_tbl.setRowCount(len(results))
+  for row,item in enumerate(results):
+   values=[item.source_path,item.relative_path,item.destination_path,item.status,str(item.replacements),item.skip_reason,item.error]
+   for column,value in enumerate(values):self.general_tbl.setItem(row,column,QTableWidgetItem(str(value)))
+ def _on_bg_log(self,line):
+  if getattr(self.bg,'operation','')=='general' and hasattr(self,'general_log'):self.general_log.appendPlainText(str(line))
+ def open_general_destination(self):
+  root=Path(self.dst.text())/self.bundle.text()
+  if root.is_dir():self._open_path(root)
+  else:QMessageBox.information(self,'General Cloner','The destination bundle does not exist yet. Run General Cloner first.')
  def _populate_recent_jobs(self):
   self.recent.clear();self.recent.addItem('Select a recent job…','')
   for root in (getattr(self.s,'recent_jobs',None) or []):
@@ -502,9 +570,13 @@ class Main(QMainWindow):
   event.accept()
  def _set_pipeline_busy(self,busy):
   self._busy=busy;self.primary.setEnabled(not busy);self.workers.setEnabled(not busy);self.batch.setEnabled(not busy);self.cloneb.setEnabled(not busy);self._sync_advanced_buttons(self.adv.isChecked());self.cancelb.setEnabled(busy);self.newjobb.setEnabled(not busy and self.job_finished())
+  if hasattr(self,'mode'):self.mode.setEnabled(not busy)
+  if hasattr(self,'general_runb'):self.general_runb.setEnabled(not busy);self.general_cancelb.setEnabled(busy);self.general_policy.setEnabled(not busy);self.general_workers.setEnabled(not busy);self.general_batch.setEnabled(not busy)
  def _start_bg(self,operation,payload):
   self._set_pipeline_busy(True);self.prog.setRange(0,0);self.status.setText('Starting '+operation+'...');self.bg.start(operation,payload)
  def _bg_progress(self,current,total,identity,output,stage):
+  if getattr(self.bg,'operation','')=='general':
+   self.general_prog.setRange(0,max(total,1));self.general_prog.setValue(current);self.general_status.setText(f'General Cloner: {current} of {total} | {identity} | {stage}');return
   self.prog.setRange(0,max(total,1));self.prog.setValue(current);self.status.setText(f'{self.bg.operation} ({int(self.workers.value())} workers x {int(self.batch.value())} per process): {current} of {total} | {identity} | {output} | {stage}')
  def cancel_unified_operation(self):
   worker=getattr(self,'discovery_worker',None) or getattr(self,'plan_worker',None) or getattr(self,'pdf_worker',None)
@@ -524,6 +596,22 @@ class Main(QMainWindow):
   elif operation=='validator':message=f'Reopen Validator {state}: {sum(x.status=="VALIDATED" for x in result)} validated, {sum(x.status=="FAILED" for x in result)} failed, {skipped} skipped';ok=all(x.status=='VALIDATED' for x in result)
   elif operation=='dryrun':message=f'Atomic Dry Run {state}: {sum(x.status=="DRY_RUN_READY_TO_PUBLISH" for x in result)} ready, {sum(x.status=="DRY_RUN_BLOCKED" for x in result)} blocked';ok=all(x.status=='DRY_RUN_READY_TO_PUBLISH' for x in result)
   elif operation=='publish':message=f'Atomic Publisher {state}: {sum(x.status=="PUBLISHED" for x in result)} published, {sum(x.status!="PUBLISHED" for x in result)} failed';ok=all(x.status=='PUBLISHED' for x in result)
+  elif operation=='general':
+   self._chain=False;self.general_results=result;self.refresh_general();self.general_prog.setRange(0,100);self.general_prog.setValue(100)
+   success=sum(x.status=='SUCCESS' for x in result);skipped_count=sum(x.status=='SKIPPED' for x in result);failed=sum(x.status=='FAILED' for x in result);discovered=success+skipped_count+failed
+   try:
+    payload=__import__('json').loads(Path(report).read_text(encoding='utf-8'));discovered=int(payload.get('summary',{}).get('discovered',discovered))
+   except (OSError,ValueError,TypeError):pass
+   message=f'General Cloner {state}: {discovered} discovered, {success} successful, {skipped_count} skipped, {failed} failed'
+   self.general_status.setText(message)
+   try:
+    log_path=Path(report).parent/'general_cloner.log'
+    if log_path.is_file():self.general_log.setPlainText(log_path.read_text(encoding='utf-8',errors='replace'))
+   except OSError:pass
+   self.status.setText(message);self.refresh_pipeline()
+   if failed:QMessageBox.warning(self,'General Cloner finished with failures',message+('\n\nReport:\n'+report if report else '')+'\n\nSee the General Cloner tab for per-file details.')
+   else:QMessageBox.information(self,'General Cloner complete',message+('\n\nReport:\n'+report if report else ''))
+   return
   else:message=operation+' '+state
   self.status.setText(message);self.refresh_pipeline()
   if cancelled:self._chain=False
@@ -535,7 +623,10 @@ class Main(QMainWindow):
   else:
    self._chain=False;self.refresh_pipeline();QMessageBox.warning(self,'Pipeline stopped',message+'\n\nFix the reported issue, then run the next step again. Completed stages are skipped automatically.')
  def _bg_failed(self,operation,message):
-  self._running_stage=None;self._chain=False;self._set_pipeline_busy(False);self.prog.setRange(0,100);self.prog.setValue(0);self.refresh_pipeline();QMessageBox.critical(self,operation+' failed',message)
+  self._running_stage=None;self._chain=False;self._set_pipeline_busy(False);self.prog.setRange(0,100);self.prog.setValue(0);self.refresh_pipeline()
+  if operation=='general':
+   self.general_prog.setRange(0,100);self.general_prog.setValue(0);self.general_status.setText('General Cloner failed. See the log and report.');self.general_log.appendPlainText(str(message))
+  QMessageBox.critical(self,operation+' failed',message)
  def build_revision_plan(self):
   try:
    self.save();builder=DestinationBuilder(self.dst.text(),self.bundle.text(),BASE);csv_path=builder.bundle_root/'_GNI_REPORTS'/'title_block_discovery_fields.csv'

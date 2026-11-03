@@ -18,6 +18,7 @@ class PipelineWorker(QThread):
     progress = Signal(int, int, str, str, str)
     completed = Signal(str, object, str, bool, int)
     failed = Signal(str, str)
+    log = Signal(str)
 
     def __init__(self, operation, payload):
         super().__init__()
@@ -245,12 +246,36 @@ class PipelineWorker(QThread):
         results=publisher.publish_many(packages,workers=workers,on_result=on_result,should_cancel=lambda:self.cancel_requested,batch_size=batch_size)
         report=publisher.write_report(self.payload['bundle_root'],results);return results,report,self.cancel_requested and len(results)<total,0
 
+    def _run_general(self):
+        """Run the file-oriented General Cloner without touching the pipeline."""
+        from general.cloner import GeneralClonerEngine
+        payload=self.payload
+        engine=GeneralClonerEngine(
+            payload['source'],payload['destination'],payload['bundle'],payload['app'],
+            payload.get('mapping') or {},
+            core_console=payload.get('core') or '',
+            lisp_source=payload.get('lisp') or '',
+            policy=payload.get('policy') or 'BACKUP_OVERWRITE',
+            workers=payload.get('workers') or 1,
+            batch_size=payload.get('batch_size') or 1,
+            timeout=payload.get('timeout') or 240,
+        )
+        def progress(done,total,identity,stage):
+            self.progress.emit(done,total,identity,'FILE',stage)
+        results,report,cancelled,skipped=engine.run(
+            should_cancel=lambda:self.cancel_requested,
+            on_progress=progress,
+            on_log=lambda line:self.log.emit(line),
+        )
+        return results,report,cancelled,skipped
+
 
 class BackgroundOperationController(QObject):
     progress = Signal(int,int,str,str,str)
     finished = Signal(str,object,str,bool,int)
     failed = Signal(str,str)
     status = Signal(str)
+    log = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent);self.worker=None;self.operation='';self.started=0.0
@@ -259,7 +284,7 @@ class BackgroundOperationController(QObject):
 
     def start(self, operation, payload):
         if self.worker and self.worker.isRunning():raise RuntimeError('Another background operation is already running: '+self.operation)
-        self.operation=operation;self.started=time.monotonic();self.last=(0,0,'','','Preparing');self.worker=PipelineWorker(operation,payload);self.worker.progress.connect(self._progress);self.worker.completed.connect(self._completed);self.worker.failed.connect(self._failed);self.timer.start(1000);self.worker.start()
+        self.operation=operation;self.started=time.monotonic();self.last=(0,0,'','','Preparing');self.worker=PipelineWorker(operation,payload);self.worker.progress.connect(self._progress);self.worker.completed.connect(self._completed);self.worker.failed.connect(self._failed);self.worker.log.connect(self.log);self.timer.start(1000);self.worker.start()
 
     def cancel(self):
         if self.worker and self.worker.isRunning():self.worker.cancel();self.status.emit('Cancellation requested. Current safe unit will finish first.')

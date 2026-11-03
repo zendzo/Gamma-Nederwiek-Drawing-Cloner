@@ -1,9 +1,16 @@
 from dataclasses import dataclass,asdict,field,fields
 from pathlib import Path
 import json
+from general.constants import GENERAL_MODE, GENERAL_POLICIES, STRUCTURAL_MODE
 @dataclass
 class Settings:
     source_folder:str=''; destination_root:str=''; destination_bundle_name:str='Nederwiek_Bundle'; core_console:str=''
+    # Two explicit modes. Structural remains the default so an existing
+    # settings.json without these keys behaves exactly as before.
+    cloner_mode:str=STRUCTURAL_MODE
+    general_conflict_policy:str='BACKUP_OVERWRITE'
+    general_workers:int=4
+    general_batch_size:int=4
     project_from:str='IJMUIDEN VER GAMMA'; project_to:str='NEDERWIEK BETA'; drawing_from:str='2013J310015'; drawing_to:str='I301-J30019'
     long_from:str='OEPA230146'; long_to:str='OEPA240101'; short_from:str='230146'; short_to:str='240101'; target_layer:str='NEDERWIEK_DATA'
     contractor_doc_from:str='2GWG'; contractor_doc_to:str='2GWN'
@@ -17,6 +24,14 @@ class Settings:
     # Machine-local convenience only; the job itself lives in _GNI_REPORTS.
     recent_jobs:list=field(default_factory=list)
     def __post_init__(self):
+        if self.cloner_mode not in (STRUCTURAL_MODE, GENERAL_MODE):
+            self.cloner_mode=STRUCTURAL_MODE
+        if self.general_conflict_policy not in GENERAL_POLICIES:
+            self.general_conflict_policy='BACKUP_OVERWRITE'
+        try:self.general_workers=min(16,max(1,int(self.general_workers)))
+        except (TypeError,ValueError):self.general_workers=4
+        try:self.general_batch_size=min(16,max(1,int(self.general_batch_size)))
+        except (TypeError,ValueError):self.general_batch_size=4
         try:self.workers=min(16,max(1,int(self.workers)))
         except (TypeError,ValueError):self.workers=4
         try:self.discovery_batch_size=min(16,max(1,int(self.discovery_batch_size)))

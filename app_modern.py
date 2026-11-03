@@ -334,6 +334,7 @@ QStatusBar {
 
 PAGE_DESCRIPTIONS = {
     "Setup": "Choose the source, destination, AutoCAD console, and migration mapping.",
+    "General Cloner": "Recursively clone every DWG and apply the configured find-and-replace mapping.",
     "Drawing Candidates": "Run the controlled migration stages and monitor every handoff report.",
     "Supporting File Clone": "Review and clone part lists, NC1 files, DXF files, and related assets.",
     "Title Block Discovery": "Inspect title-block entities discovered from each DWG.",
@@ -345,6 +346,7 @@ PAGE_DESCRIPTIONS = {
 # Short label on the left, full tab title on the right.
 NAV_CAPTIONS = {
     "Setup": "Setup",
+    "General Cloner": "General Cloner",
     "Drawing Candidates": "Drawing Candidates",
     "Supporting File Clone": "Supporting Files",
     "Title Block Discovery": "Discovery Results",
@@ -358,6 +360,7 @@ NAV_CAPTIONS = {
 ICON_DIR = paths.app_root() / "resources" / "icons"
 NAV_ICONS = {
     "Setup": "setup.svg",
+    "General Cloner": "general.svg",
     "Drawing Candidates": "candidates.svg",
     "Supporting File Clone": "supporting.svg",
     "Title Block Discovery": "discovery.svg",
@@ -427,6 +430,10 @@ class ModernMain(legacy.Main):
         self._reports_timer.timeout.connect(self.refresh_reports)
         self._install_modern_shell()
         self._apply_widget_roles()
+        # The legacy tab widget is gone, so re-apply the mode visibility on the
+        # sidebar (the Setup-page groups were toggled before the shell moved
+        # the pages into the stack).
+        self._apply_mode_visibility()
         # Apply QSS only after all objectName roles have been assigned.
         # Qt can otherwise keep the generic QPushButton rendering.
         self.setStyleSheet(MODERN_QSS)
@@ -598,6 +605,8 @@ class ModernMain(legacy.Main):
     def _apply_widget_roles(self) -> None:
         if hasattr(self, "primary"):
             self.primary.setObjectName("primaryButton")
+        if hasattr(self, "general_runb"):
+            self.general_runb.setObjectName("primaryButton")
         # Secondary action directly under the primary button; it only enables
         # once the controller reports the job finished (app.Main::job_finished).
         if hasattr(self, "newjobb"):
@@ -611,6 +620,10 @@ class ModernMain(legacy.Main):
             self.workers.setObjectName("workerInput")
         if hasattr(self, "batch"):
             self.batch.setObjectName("workerInput")
+        if hasattr(self, "general_workers"):
+            self.general_workers.setObjectName("workerInput")
+        if hasattr(self, "general_batch"):
+            self.general_batch.setObjectName("workerInput")
         if hasattr(self, "adv"):
             self.adv.setObjectName("advancedGroup")
         if hasattr(self, "recent"):
@@ -627,7 +640,8 @@ class ModernMain(legacy.Main):
             self.adv.setVisible(True)
             self.adv.setMinimumHeight(82)
         for widget in self.findChildren(QLabel):
-            if widget.text().strip() in ("Parallel workers", "Batch size"):
+            if widget.text().strip() in ("Parallel workers", "Batch size",
+                                         "Clone workers", "Clone batch"):
                 widget.setObjectName("workerLabel")
         for widget in self.findChildren(QPushButton):
             text = widget.text().strip().lower()
